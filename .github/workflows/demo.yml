@@ -1,0 +1,42 @@
+name: Demo GIF
+
+on:
+  push:
+    branches: [main]
+    paths: [docs/demo.tape]
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Build bgtask
+        run: go build -o /usr/local/bin/bgtask ./cmd/bgtask
+
+      - name: Install VHS and dependencies
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg ttyd vhs python3 curl jq
+
+      - name: Generate demo GIF
+        run: vhs docs/demo.tape
+
+      - name: Upload to assets release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create the assets release if it doesn't exist yet.
+          gh release view assets >/dev/null 2>&1 || \
+            gh release create assets --title "Assets" --notes "Auto-generated demo assets." --latest=false
+          gh release upload assets docs/demo.gif --clobber

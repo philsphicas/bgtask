@@ -1,0 +1,9 @@
+/bin/
+/bgtask
+*.exe
+*.test
+*.webm
+docs/demo.gif
+coverage.txt
+coverage-e2e.txt
+.coverdata/

@@ -1,0 +1,51 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofmt
+
+linters:
+  enable:
+    - errcheck
+    - gosec
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gocritic
+    - revive
+    - misspell
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - charm.land/lipgloss/v2.Print
+        - charm.land/lipgloss/v2.Printf
+        - charm.land/lipgloss/v2.Println
+
+    gosec:
+      excludes:
+        - G104 # unhandled errors (covered by errcheck)
+        - G115 # integer overflow conversion
+        - G204 # subprocess launched with variable (intentional -- we exec user commands)
+        - G304 # file inclusion via variable (paths are constructed internally)
+        - G301 # directory permissions (0o700 in prod, relaxed in tests)
+        - G306 # file permissions (0o600 in prod, relaxed in tests)
+
+  exclusions:
+    rules:
+      - linters:
+          - errcheck
+        path: _test\.go
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
