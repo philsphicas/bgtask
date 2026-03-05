@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	lipgloss "charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
+	"github.com/charmbracelet/x/term"
+	"github.com/mattn/go-runewidth"
 	"github.com/philsphicas/bgtask/internal/process"
 	"github.com/philsphicas/bgtask/internal/state"
 	"github.com/philsphicas/bgtask/internal/supervisor"
@@ -134,8 +137,9 @@ func (r *RunCmd) Run(store *state.Store) error {
 
 // LsCmd lists managed background tasks.
 type LsCmd struct {
-	JSON bool   `help:"Output as JSON." json:"-"`
-	Tag  string `help:"Filter by tag."`
+	JSON    bool   `help:"Output as JSON." json:"-"`
+	Tag     string `help:"Filter by tag."`
+	NoTrunc bool   `help:"Do not truncate command output."`
 }
 
 func (l *LsCmd) Run(store *state.Store) error {
@@ -219,6 +223,10 @@ func (l *LsCmd) Run(store *state.Store) error {
 		return enc.Encode(tasks)
 	}
 
+	headers := []string{"NAME", "ID", "PID", "STATUS", "PORTS", "AGE", "COMMAND"}
+	const numCols = 7
+	const cellPad = 2 // Padding(0, 1) adds 1 char each side.
+
 	var rows [][]string
 	for _, t := range tasks {
 		pidStr := "-"
@@ -231,11 +239,40 @@ func (l *LsCmd) Run(store *state.Store) error {
 		})
 	}
 
+	// Truncate COMMAND column to fit the terminal unless --no-trunc is set
+	// or stdout is not a TTY (piped output gets full commands).
+	cmdColWidth := 0
+	if tw := terminalWidth(); tw > 0 && !l.NoTrunc {
+		// Measure max content width of each fixed column (0–5).
+		colWidths := make([]int, numCols)
+		for i, h := range headers {
+			colWidths[i] = runewidth.StringWidth(h)
+		}
+		for _, row := range rows {
+			for i := 0; i < numCols-1; i++ {
+				if w := runewidth.StringWidth(row[i]); w > colWidths[i] {
+					colWidths[i] = w
+				}
+			}
+		}
+		fixedWidth := 0
+		for i := 0; i < numCols-1; i++ {
+			fixedWidth += colWidths[i] + cellPad
+		}
+		cmdColWidth = tw - fixedWidth - cellPad
+		if cmdColWidth < 20 {
+			cmdColWidth = 20
+		}
+		for i := range rows {
+			rows[i][6] = truncateCommand(rows[i][6], cmdColWidth)
+		}
+	}
+
 	tbl := table.New().
 		BorderTop(false).BorderBottom(false).BorderLeft(false).BorderRight(false).
 		BorderHeader(true).BorderColumn(false).BorderRow(false).
 		BorderStyle(ui.Dim).
-		Headers("NAME", "ID", "PID", "STATUS", "PORTS", "AGE", "COMMAND").
+		Headers(headers...).
 		StyleFunc(func(row, col int) lipgloss.Style {
 			s := lipgloss.NewStyle().Padding(0, 1)
 			if row == table.HeaderRow {
@@ -255,6 +292,33 @@ func (l *LsCmd) Run(store *state.Store) error {
 
 func formatCommand(meta *state.Meta) string {
 	return strings.Join(meta.Command, " ")
+}
+
+// terminalWidth returns the terminal width, or 0 if stdout is not a TTY.
+// Respects the COLUMNS environment variable as an override, which is useful
+// in non-TTY contexts (e.g., testing).
+func terminalWidth() int {
+	if cols := os.Getenv("COLUMNS"); cols != "" {
+		if w, err := strconv.Atoi(cols); err == nil && w > 0 {
+			return w
+		}
+	}
+	w, _, err := term.GetSize(os.Stdout.Fd())
+	if err != nil {
+		return 0
+	}
+	return w
+}
+
+// truncateCommand truncates s to maxWidth display columns, appending "…" if truncated.
+func truncateCommand(s string, maxWidth int) string {
+	if maxWidth <= 0 || runewidth.StringWidth(s) <= maxWidth {
+		return s
+	}
+	if maxWidth <= 1 {
+		return "…"
+	}
+	return runewidth.Truncate(s, maxWidth, "…")
 }
 
 func formatDuration(d time.Duration) string {

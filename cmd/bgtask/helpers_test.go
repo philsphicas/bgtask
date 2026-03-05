@@ -91,6 +91,50 @@ func TestFormatCommand(t *testing.T) {
 	}
 }
 
+func TestTruncateCommand_Short(t *testing.T) {
+	got := truncateCommand("echo hello", 80)
+	if got != "echo hello" {
+		t.Errorf("truncateCommand(short, 80) = %q, want %q", got, "echo hello")
+	}
+}
+
+func TestTruncateCommand_ExactFit(t *testing.T) {
+	cmd := "echo hello"
+	got := truncateCommand(cmd, len(cmd))
+	if got != cmd {
+		t.Errorf("truncateCommand(exact, %d) = %q, want %q", len(cmd), got, cmd)
+	}
+}
+
+func TestTruncateCommand_Truncated(t *testing.T) {
+	cmd := "ssh -N -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/very/long/path"
+	got := truncateCommand(cmd, 30)
+	if len([]rune(got)) != 30 {
+		t.Errorf("truncateCommand len = %d, want 30", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncateCommand should end with …, got %q", got)
+	}
+	if got != "ssh -N -o StrictHostKeyChecki…" {
+		t.Errorf("truncateCommand = %q, want %q", got, "ssh -N -o StrictHostKeyChecki…")
+	}
+}
+
+func TestTruncateCommand_MinWidth(t *testing.T) {
+	got := truncateCommand("long command string", 1)
+	if got != "…" {
+		t.Errorf("truncateCommand(s, 1) = %q, want %q", got, "…")
+	}
+}
+
+func TestTruncateCommand_ZeroWidth(t *testing.T) {
+	cmd := "echo hello"
+	got := truncateCommand(cmd, 0)
+	if got != cmd {
+		t.Errorf("truncateCommand(s, 0) = %q, want original %q", got, cmd)
+	}
+}
+
 func TestStyledAlive(t *testing.T) {
 	if got := styledAlive(true); !strings.Contains(got, "running") {
 		t.Errorf("styledAlive(true) = %q, want to contain 'running'", got)

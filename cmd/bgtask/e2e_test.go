@@ -444,3 +444,45 @@ func TestE2E_RunNoCommand(t *testing.T) {
 		t.Errorf("expected 'provide a command' error, got: %s", out)
 	}
 }
+
+func TestE2E_NoTrunc(t *testing.T) {
+	t.Parallel()
+
+	// Launch a task with a deliberately long command.
+	longArg := strings.Repeat("x", 200)
+	run(t, "run", "--name", "e2e-notrunc", "--", "echo", longArg)
+	waitForExit(t, "e2e-notrunc")
+
+	// Helper to run ls with extra env vars.
+	lsWithEnv := func(extraEnv []string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bgtaskBin, args...)
+		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+testConfigDir)
+		if coverDir != "" {
+			cmd.Env = append(cmd.Env, "GOCOVERDIR="+coverDir)
+		}
+		cmd.Env = append(cmd.Env, extraEnv...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bgtask %s failed: %v\n%s", strings.Join(args, " "), err, string(out))
+		}
+		return string(out)
+	}
+
+	// With a narrow COLUMNS, the command should be truncated.
+	narrow := lsWithEnv([]string{"COLUMNS=80"}, "ls")
+	if strings.Contains(narrow, longArg) {
+		t.Errorf("expected command to be truncated at COLUMNS=80, but full command appeared")
+	}
+	if !strings.Contains(narrow, "…") {
+		t.Errorf("expected truncated output to contain '…'")
+	}
+
+	// With --no-trunc, the full command should appear regardless of COLUMNS.
+	full := lsWithEnv([]string{"COLUMNS=80"}, "ls", "--no-trunc")
+	if !strings.Contains(full, longArg) {
+		t.Errorf("expected --no-trunc to show full command, got: %s", full)
+	}
+
+	run(t, "rm", "e2e-notrunc")
+}
