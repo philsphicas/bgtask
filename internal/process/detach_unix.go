@@ -33,20 +33,17 @@ func Detach(args []string) (*os.Process, error) {
 	return &os.Process{Pid: pid}, nil
 }
 
-// SignalPause sends SIGUSR1 to a process (pause).
-func SignalPause(pid int) error {
+// SignalRestart sends SIGHUP to a process (restart).
+func SignalRestart(pid int) error {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return err
 	}
-	return proc.Signal(syscall.SIGUSR1)
+	return proc.Signal(syscall.SIGHUP)
 }
 
-// SignalResume sends SIGUSR2 to a process (resume).
-func SignalResume(pid int) error {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	return proc.Signal(syscall.SIGUSR2)
+// SignalStop sends SIGTERM to a process (stop). On Unix this is the same
+// as SignalTerm; on Windows it uses a control file instead.
+func SignalStop(pid int) error {
+	return SignalTerm(pid)
 }

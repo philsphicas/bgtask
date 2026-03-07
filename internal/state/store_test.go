@@ -577,3 +577,135 @@ func TestRotateLogMaxFilesDropped(t *testing.T) {
 		t.Errorf(".3 should have 'rot-2', got %q", string(data))
 	}
 }
+
+func TestWriteChildStartTime_ReadChildStartTime(t *testing.T) {
+	dir := t.TempDir()
+	s := &Store{Root: dir}
+
+	meta := &Meta{
+		ID:      GenerateID(),
+		Name:    "cst-test",
+		Command: []string{"echo"},
+		Cwd:     "/tmp",
+	}
+	if err := s.Create(meta); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().Truncate(time.Nanosecond)
+	if err := s.WriteChildStartTime(meta.ID, now); err != nil {
+		t.Fatalf("WriteChildStartTime: %v", err)
+	}
+
+	got := s.ReadChildStartTime(meta.ID)
+	if !got.Equal(now) {
+		t.Errorf("ReadChildStartTime = %v, want %v", got, now)
+	}
+}
+
+func TestReadChildStartTime_Missing(t *testing.T) {
+	dir := t.TempDir()
+	s := &Store{Root: dir}
+
+	got := s.ReadChildStartTime("nonexistent")
+	if !got.IsZero() {
+		t.Errorf("ReadChildStartTime for missing file = %v, want zero", got)
+	}
+}
+
+func TestClearExit_Existing(t *testing.T) {
+	dir := t.TempDir()
+	s := &Store{Root: dir}
+
+	meta := &Meta{
+		ID:      GenerateID(),
+		Name:    "clear-exit-test",
+		Command: []string{"false"},
+		Cwd:     "/tmp",
+	}
+	if err := s.Create(meta); err != nil {
+		t.Fatal(err)
+	}
+
+	exitInfo := &Exit{Code: 1, ExitedAt: time.Now()}
+	if err := s.WriteExit(meta.ID, exitInfo); err != nil {
+		t.Fatalf("WriteExit: %v", err)
+	}
+
+	// exit.json should exist.
+	ex, err := s.ReadExit(meta.ID)
+	if err != nil {
+		t.Fatalf("ReadExit: %v", err)
+	}
+	if ex == nil {
+		t.Fatal("expected exit.json to exist before ClearExit")
+	}
+
+	if err := s.ClearExit(meta.ID); err != nil {
+		t.Fatalf("ClearExit: %v", err)
+	}
+
+	// exit.json should be gone.
+	ex, err = s.ReadExit(meta.ID)
+	if err != nil {
+		t.Fatalf("ReadExit after ClearExit: %v", err)
+	}
+	if ex != nil {
+		t.Errorf("expected nil exit after ClearExit, got %+v", ex)
+	}
+}
+
+func TestClearExit_Missing(t *testing.T) {
+	dir := t.TempDir()
+	s := &Store{Root: dir}
+
+	meta := &Meta{
+		ID:      GenerateID(),
+		Name:    "clear-exit-missing",
+		Command: []string{"echo"},
+		Cwd:     "/tmp",
+	}
+	if err := s.Create(meta); err != nil {
+		t.Fatal(err)
+	}
+
+	// ClearExit on a task with no exit.json should not error.
+	if err := s.ClearExit(meta.ID); err != nil {
+		t.Fatalf("ClearExit (missing): %v", err)
+	}
+}
+
+func TestWriteChildCreateTime_ReadChildCreateTime(t *testing.T) {
+	dir := t.TempDir()
+	s := &Store{Root: dir}
+
+	meta := &Meta{
+		ID:      GenerateID(),
+		Name:    "cct-test",
+		Command: []string{"echo"},
+		Cwd:     "/tmp",
+	}
+	if err := s.Create(meta); err != nil {
+		t.Fatal(err)
+	}
+
+	var ct int64 = 123456789
+	if err := s.WriteChildCreateTime(meta.ID, ct); err != nil {
+		t.Fatalf("WriteChildCreateTime: %v", err)
+	}
+
+	got := s.ReadChildCreateTime(meta.ID)
+	if got != ct {
+		t.Errorf("ReadChildCreateTime = %d, want %d", got, ct)
+	}
+}
+
+func TestReadChildCreateTime_Missing(t *testing.T) {
+	dir := t.TempDir()
+	s := &Store{Root: dir}
+
+	got := s.ReadChildCreateTime("nonexistent")
+	if got != 0 {
+		t.Errorf("ReadChildCreateTime for missing file = %d, want 0", got)
+	}
+}

@@ -26,7 +26,7 @@ type Meta struct {
 	Command        []string          `json:"command"`
 	Cwd            string            `json:"cwd"`
 	EnvOverrides   map[string]string `json:"env_overrides,omitempty"`
-	Tags           []string          `json:"tags,omitempty"`
+	Labels         []string          `json:"labels,omitempty"`
 	Restart        string            `json:"restart,omitempty"`
 	RestartDelay   time.Duration     `json:"restart_delay,omitempty"`
 	HealthCheck    string            `json:"health_check,omitempty"`
@@ -40,6 +40,34 @@ type Exit struct {
 	Code     int       `json:"code"`
 	Signal   string    `json:"signal,omitempty"`
 	ExitedAt time.Time `json:"exited_at"`
+}
+
+// TaskStatus describes the current state of a task with typed sub-state.
+type TaskStatus struct {
+	State   string       `json:"state"` // "running", "exited", "dead", "unknown"
+	Running *RunningInfo `json:"running,omitempty"`
+	Exited  *ExitedInfo  `json:"exited,omitempty"`
+	Dead    *DeadInfo    `json:"dead,omitempty"`
+}
+
+// RunningInfo holds details for a running task.
+type RunningInfo struct {
+	SupervisorPID int        `json:"supervisor_pid"`
+	ChildPID      int        `json:"child_pid"`
+	Ports         []uint32   `json:"ports,omitempty"`
+	Since         *time.Time `json:"since,omitempty"`
+}
+
+// ExitedInfo holds details for an exited task.
+type ExitedInfo struct {
+	Code   int       `json:"code"`
+	Signal string    `json:"signal,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// DeadInfo holds details for a dead task (supervisor crashed).
+type DeadInfo struct {
+	Message string `json:"message"`
 }
 
 // Store provides access to the bgtask state directory.
@@ -192,6 +220,47 @@ func (s *Store) ReadCreateTime(id string) int64 {
 	return v
 }
 
+// WriteChildStartTime writes the child process start time.
+func (s *Store) WriteChildStartTime(id string, t time.Time) error {
+	p := filepath.Join(s.TaskDir(id), "child.starttime")
+	return os.WriteFile(p, []byte(t.Format(time.RFC3339Nano)), 0o600)
+}
+
+// ReadChildStartTime reads the child process start time.
+func (s *Store) ReadChildStartTime(id string) time.Time {
+	p := filepath.Join(s.TaskDir(id), "child.starttime")
+	data, err := os.ReadFile(p) //nolint:gosec // path is constructed internally
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// WriteChildCreateTime writes the child process OS-level creation time
+// (for PID reuse protection, analogous to WriteCreateTime for the supervisor).
+func (s *Store) WriteChildCreateTime(id string, createTime int64) error {
+	p := filepath.Join(s.TaskDir(id), "child.createtime")
+	return os.WriteFile(p, []byte(strconv.FormatInt(createTime, 10)), 0o600)
+}
+
+// ReadChildCreateTime reads the child process OS-level creation time.
+func (s *Store) ReadChildCreateTime(id string) int64 {
+	p := filepath.Join(s.TaskDir(id), "child.createtime")
+	data, err := os.ReadFile(p) //nolint:gosec // path is constructed internally
+	if err != nil {
+		return 0
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
 // WriteExit writes exit.json.
 func (s *Store) WriteExit(id string, exit *Exit) error {
 	data, err := json.MarshalIndent(exit, "", "  ")
@@ -285,6 +354,16 @@ func (s *Store) Rename(id, newName string) error {
 	return s.writeMeta(meta)
 }
 
+// SetLabels replaces the labels on a task.
+func (s *Store) SetLabels(id string, labels []string) error {
+	meta, err := s.ReadMeta(id)
+	if err != nil {
+		return err
+	}
+	meta.Labels = labels
+	return s.writeMeta(meta)
+}
+
 // IsNameTaken checks if any active task already uses the given name.
 func (s *Store) IsNameTaken(name string) (bool, error) {
 	ids, err := s.ListIDs()
@@ -316,7 +395,31 @@ func atomicWrite(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
+// ClearExit removes exit.json so a stopped task can be re-started.
+func (s *Store) ClearExit(id string) error {
+	p := filepath.Join(s.TaskDir(id), "exit.json")
+	err := os.Remove(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // Remove deletes a task's state directory entirely.
+// On Windows, recently-terminated processes may still hold file handles
+// briefly, so we retry a few times before giving up.
 func (s *Store) Remove(id string) error {
-	return os.RemoveAll(s.TaskDir(id))
+	dir := s.TaskDir(id)
+	var err error
+	for i := 0; i < 5; i++ {
+		err = os.RemoveAll(dir)
+		if err == nil {
+			return nil
+		}
+		if runtime.GOOS != "windows" {
+			return err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return err
 }
