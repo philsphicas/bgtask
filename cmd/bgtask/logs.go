@@ -13,7 +13,7 @@ import (
 	"github.com/philsphicas/bgtask/internal/ui"
 )
 
-func showLogs(logFiles []string, exitJSONPath string, follow bool, tail int, since time.Duration, stdoutOnly, stderrOnly, timestamps bool) error {
+func showLogs(logFiles []string, exitJSONPath string, follow bool, tail int, since time.Duration, sinceTime time.Time, stdoutOnly, stderrOnly, timestamps bool) error {
 	if len(logFiles) == 0 {
 		fmt.Println("No logs yet.")
 		return nil
@@ -30,7 +30,18 @@ func showLogs(logFiles []string, exitJSONPath string, follow bool, tail int, sin
 		entries = append(entries, fileEntries...)
 	}
 
-	// Apply --since filter.
+	// Filter to current run (sinceTime from child.starttime).
+	if !sinceTime.IsZero() {
+		var filtered []supervisor.LogEntry
+		for _, e := range entries {
+			if !e.Time.Before(sinceTime) {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+	}
+
+	// Apply --since filter (relative duration).
 	if since > 0 {
 		cutoff := time.Now().Add(-since)
 		var filtered []supervisor.LogEntry
@@ -43,8 +54,12 @@ func showLogs(logFiles []string, exitJSONPath string, follow bool, tail int, sin
 	}
 
 	// Apply tail.
-	if tail > 0 && len(entries) > tail {
-		entries = entries[len(entries)-tail:]
+	if tail >= 0 {
+		if tail == 0 {
+			entries = nil
+		} else if len(entries) > tail {
+			entries = entries[len(entries)-tail:]
+		}
 	}
 
 	// Print entries.

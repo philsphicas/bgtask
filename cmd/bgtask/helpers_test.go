@@ -43,21 +43,21 @@ func TestFormatDuration_Days(t *testing.T) {
 	}
 }
 
-func TestHasTag_Found(t *testing.T) {
-	if !hasTag([]string{"tunnel", "prod"}, "tunnel") {
-		t.Error("expected hasTag to return true")
+func TestHasLabel_Found(t *testing.T) {
+	if !hasLabel([]string{"tunnel", "prod"}, "tunnel") {
+		t.Error("expected hasLabel to return true")
 	}
 }
 
-func TestHasTag_NotFound(t *testing.T) {
-	if hasTag([]string{"tunnel", "prod"}, "dev") {
-		t.Error("expected hasTag to return false")
+func TestHasLabel_NotFound(t *testing.T) {
+	if hasLabel([]string{"tunnel", "prod"}, "dev") {
+		t.Error("expected hasLabel to return false")
 	}
 }
 
-func TestHasTag_EmptySlice(t *testing.T) {
-	if hasTag(nil, "tunnel") {
-		t.Error("expected hasTag to return false for nil slice")
+func TestHasLabel_EmptySlice(t *testing.T) {
+	if hasLabel(nil, "tunnel") {
+		t.Error("expected hasLabel to return false for nil slice")
 	}
 }
 
@@ -91,11 +91,103 @@ func TestFormatCommand(t *testing.T) {
 	}
 }
 
+func TestTruncateCommand_Short(t *testing.T) {
+	got := truncateCommand("echo hello", 80)
+	if got != "echo hello" {
+		t.Errorf("truncateCommand(short, 80) = %q, want %q", got, "echo hello")
+	}
+}
+
+func TestTruncateCommand_ExactFit(t *testing.T) {
+	cmd := "echo hello"
+	got := truncateCommand(cmd, len(cmd))
+	if got != cmd {
+		t.Errorf("truncateCommand(exact, %d) = %q, want %q", len(cmd), got, cmd)
+	}
+}
+
+func TestTruncateCommand_Truncated(t *testing.T) {
+	cmd := "ssh -N -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/very/long/path"
+	got := truncateCommand(cmd, 30)
+	if len([]rune(got)) != 30 {
+		t.Errorf("truncateCommand len = %d, want 30", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncateCommand should end with …, got %q", got)
+	}
+	if got != "ssh -N -o StrictHostKeyChecki…" {
+		t.Errorf("truncateCommand = %q, want %q", got, "ssh -N -o StrictHostKeyChecki…")
+	}
+}
+
+func TestTruncateCommand_MinWidth(t *testing.T) {
+	got := truncateCommand("long command string", 1)
+	if got != "…" {
+		t.Errorf("truncateCommand(s, 1) = %q, want %q", got, "…")
+	}
+}
+
+func TestTruncateCommand_ZeroWidth(t *testing.T) {
+	cmd := "echo hello"
+	got := truncateCommand(cmd, 0)
+	if got != cmd {
+		t.Errorf("truncateCommand(s, 0) = %q, want original %q", got, cmd)
+	}
+}
+
 func TestStyledAlive(t *testing.T) {
 	if got := styledAlive(true); !strings.Contains(got, "running") {
 		t.Errorf("styledAlive(true) = %q, want to contain 'running'", got)
 	}
 	if got := styledAlive(false); !strings.Contains(got, "dead") {
 		t.Errorf("styledAlive(false) = %q, want to contain 'dead'", got)
+	}
+}
+
+func TestStatusDisplayString(t *testing.T) {
+	now := time.Now()
+	twoMinAgo := now.Add(-2 * time.Minute)
+
+	tests := []struct {
+		name     string
+		ts       state.TaskStatus
+		contains string
+	}{
+		{"running with since", state.TaskStatus{State: "running", Running: &state.RunningInfo{Since: &twoMinAgo}}, "running (2m"},
+		{"running no since", state.TaskStatus{State: "running"}, "running"},
+		{"exited code 0", state.TaskStatus{State: "exited", Exited: &state.ExitedInfo{Code: 0, At: twoMinAgo}}, "exited(0) (2m"},
+		{"exited code 1", state.TaskStatus{State: "exited", Exited: &state.ExitedInfo{Code: 1, At: twoMinAgo}}, "exited(1) (2m"},
+		{"exited nil info", state.TaskStatus{State: "exited"}, "exited"},
+		{"dead", state.TaskStatus{State: "dead"}, "dead"},
+		{"unknown", state.TaskStatus{State: "unknown"}, "unknown"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := statusDisplayString(tc.ts)
+			if !strings.Contains(got, tc.contains) {
+				t.Errorf("statusDisplayString() = %q, want to contain %q", got, tc.contains)
+			}
+		})
+	}
+}
+
+func TestStatusState(t *testing.T) {
+	tests := []struct {
+		name string
+		ts   state.TaskStatus
+		want string
+	}{
+		{"running", state.TaskStatus{State: "running"}, "running"},
+		{"exited 0", state.TaskStatus{State: "exited", Exited: &state.ExitedInfo{Code: 0}}, "exited(0)"},
+		{"exited 1", state.TaskStatus{State: "exited", Exited: &state.ExitedInfo{Code: 1}}, "exited(1)"},
+		{"exited nil", state.TaskStatus{State: "exited"}, "exited"},
+		{"dead", state.TaskStatus{State: "dead"}, "dead"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := statusState(tc.ts); got != tc.want {
+				t.Errorf("statusState() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

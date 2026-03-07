@@ -1,6 +1,6 @@
 // Package supervisor implements the background supervisor shim that manages
 // child process lifecycle, captures interleaved stdout/stderr to JSONL, and
-// handles restart/pause/resume signals.
+// handles restart/stop signals.
 package supervisor
 
 import (
@@ -73,15 +73,13 @@ func Run(cfg *Config) error {
 	logger := &jsonlWriter{f: logFile}
 
 	// Set up signal handling.
-	var paused atomic.Bool
 	var stopRequested atomic.Bool
+	var restartRequested atomic.Bool
 
 	sigCh := make(chan os.Signal, 16)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	if runtime.GOOS != "windows" {
-		// SIGUSR1 = pause, SIGUSR2 = resume.
-		// Can't use syscall.SIGUSR1/2 directly -- not defined on Windows.
-		signal.Notify(sigCh, sigUSR1, sigUSR2)
+		signal.Notify(sigCh, sigHUP)
 	}
 
 	// done is closed when Run returns, so background goroutines exit cleanly.
@@ -91,9 +89,10 @@ func Run(cfg *Config) error {
 		close(done)
 	}()
 
-	// Channel to signal the child should be killed for pause.
-	pauseCh := make(chan struct{}, 1)
-	resumeCh := make(chan struct{}, 1)
+	// stopCh signals the child should be killed (stop or restart).
+	stopCh := make(chan struct{}, 1)
+	// restartCh signals an explicit restart was requested.
+	restartCh := make(chan struct{}, 1)
 
 	// Signal handler goroutine. Non-blocking sends to avoid deadlock.
 	go func() {
@@ -109,27 +108,23 @@ func Run(cfg *Config) error {
 				case syscall.SIGTERM, syscall.SIGINT:
 					stopRequested.Store(true)
 					select {
-					case pauseCh <- struct{}{}:
+					case stopCh <- struct{}{}:
 					default:
 					}
 				default:
-					sigNum, _ := sig.(syscall.Signal)
-					switch sigNum {
-					case sigUSR1: // pause
-						paused.Store(true)
-						logger.WriteEvent("paused", nil, nil, "")
+					if sigNum, ok := sig.(syscall.Signal); ok && sigNum == sigHUP {
+						if stopRequested.Load() {
+							continue // ignore restart during shutdown
+						}
+						restartRequested.Store(true)
+						logger.WriteEvent("restarted", nil, nil, "")
 						select {
-						case pauseCh <- struct{}{}:
+						case restartCh <- struct{}{}:
 						default:
 						}
-					case sigUSR2: // resume
-						if paused.Load() {
-							paused.Store(false)
-							logger.WriteEvent("resumed", nil, nil, "")
-							select {
-							case resumeCh <- struct{}{}:
-							default:
-							}
+						select {
+						case stopCh <- struct{}{}:
+						default:
 						}
 					}
 				}
@@ -137,11 +132,11 @@ func Run(cfg *Config) error {
 		}
 	}()
 
-	// On Windows, poll a control file for pause/resume since SIGUSR doesn't exist.
+	// On Windows, poll a control file for restart since SIGHUP doesn't exist.
 	if runtime.GOOS == "windows" {
 		ctlPath := filepath.Join(cfg.StateDir, "ctl")
 		go func() {
-			ticker := time.NewTicker(time.Second)
+			ticker := time.NewTicker(200 * time.Millisecond)
 			defer ticker.Stop()
 			for {
 				select {
@@ -150,7 +145,9 @@ func Run(cfg *Config) error {
 				case <-ticker.C:
 				}
 				// Atomic read: rename ctl -> ctl.processing, then read + delete.
+				// Remove stale .processing file first (Windows rename fails if dest exists).
 				procPath := ctlPath + ".processing"
+				_ = os.Remove(procPath)
 				if err := os.Rename(ctlPath, procPath); err != nil {
 					continue
 				}
@@ -160,22 +157,23 @@ func Run(cfg *Config) error {
 					continue
 				}
 				action := strings.TrimSpace(string(data))
-				switch action {
-				case "pause":
-					paused.Store(true)
-					logger.WriteEvent("paused", nil, nil, "")
+				if action == "restart" && !stopRequested.Load() {
+					restartRequested.Store(true)
+					logger.WriteEvent("restarted", nil, nil, "")
 					select {
-					case pauseCh <- struct{}{}:
+					case restartCh <- struct{}{}:
 					default:
 					}
-				case "resume":
-					if paused.Load() {
-						paused.Store(false)
-						logger.WriteEvent("resumed", nil, nil, "")
-						select {
-						case resumeCh <- struct{}{}:
-						default:
-						}
+					select {
+					case stopCh <- struct{}{}:
+					default:
+					}
+				}
+				if action == "stop" {
+					stopRequested.Store(true)
+					select {
+					case stopCh <- struct{}{}:
+					default:
 					}
 				}
 			}
@@ -191,13 +189,18 @@ func Run(cfg *Config) error {
 			}
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
+			consecutiveFailures := 0
 			for {
 				select {
 				case <-done:
 					return
 				case <-ticker.C:
 				}
-				if paused.Load() {
+				// Reset failure counter if a restart was triggered by another
+				// source (e.g., user SIGHUP), so we don't carry stale failures
+				// into the new child's lifecycle.
+				if restartRequested.Load() {
+					consecutiveFailures = 0
 					continue
 				}
 				timeout := cfg.HealthInterval
@@ -219,8 +222,23 @@ func Run(cfg *Config) error {
 						msg = err.Error()
 					}
 					logger.WriteHealthEvent("health_fail", msg)
+					consecutiveFailures++
+					if (cfg.Restart == "on-failure" || cfg.Restart == "always") && consecutiveFailures >= 3 && !stopRequested.Load() && !restartRequested.Load() {
+						logger.WriteEvent("restarting_unhealthy", nil, nil, "")
+						restartRequested.Store(true)
+						select {
+						case restartCh <- struct{}{}:
+						default:
+						}
+						select {
+						case stopCh <- struct{}{}:
+						default:
+						}
+						consecutiveFailures = 0
+					}
 				} else {
 					logger.WriteHealthEvent("health_ok", "")
+					consecutiveFailures = 0
 				}
 			}
 		}()
@@ -235,7 +253,7 @@ func Run(cfg *Config) error {
 	attempt := 0
 	for {
 		attempt++
-		exitCode, err := runChild(cfg, logger, pauseCh, &stopRequested)
+		exitCode, err := runChild(cfg, logger, stopCh, &stopRequested)
 
 		if stopRequested.Load() {
 			// Explicit stop -- write exit and terminate.
@@ -247,23 +265,20 @@ func Run(cfg *Config) error {
 			return nil
 		}
 
-		if paused.Load() {
-			// Paused -- wait for resume or stop signal.
-			logger.WriteEvent("child_exited", &exitCode, &attempt, "")
+		if restartRequested.Load() {
+			// Restart was requested -- reset attempt counter and loop immediately.
+			restartRequested.Store(false)
+			// Drain restartCh and stopCh to prevent stale signals from
+			// killing the next child.
 			select {
-			case <-resumeCh:
-				attempt = 0
-				continue
-			case <-pauseCh:
-				// SIGTERM arrived while paused.
-				if stopRequested.Load() {
-					exit := &state.Exit{Code: exitCode, ExitedAt: time.Now()}
-					_ = cfg.Store.WriteExit(cfg.Meta.ID, exit)
-					logger.WriteEvent("stopped", &exitCode, nil, "")
-					closeLogFile()
-					return nil
-				}
+			case <-restartCh:
+			default:
 			}
+			select {
+			case <-stopCh:
+			default:
+			}
+			attempt = 0
 			continue
 		}
 
@@ -272,7 +287,8 @@ func Run(cfg *Config) error {
 		}
 
 		// Child exited on its own. Decide whether to restart.
-		shouldRestart := cfg.Restart == "always" || (cfg.Restart == "on-failure" && exitCode != 0)
+		shouldRestart := cfg.Restart == "always" ||
+			(cfg.Restart == "on-failure" && exitCode != 0)
 		if !shouldRestart {
 			exit := &state.Exit{Code: exitCode, ExitedAt: time.Now()}
 			_ = cfg.Store.WriteExit(cfg.Meta.ID, exit)
@@ -310,12 +326,12 @@ func Run(cfg *Config) error {
 			}
 		}
 
-		// Wait for delay or stop signal.
+		// Wait for delay or stop/restart signal.
 		timer := time.NewTimer(delay)
 		select {
 		case <-timer.C:
 			// Continue to restart.
-		case <-pauseCh:
+		case <-stopCh:
 			timer.Stop()
 			if stopRequested.Load() {
 				exit := &state.Exit{Code: exitCode, ExitedAt: time.Now()}
@@ -323,19 +339,13 @@ func Run(cfg *Config) error {
 				closeLogFile()
 				return nil
 			}
-			if paused.Load() {
-				// Wait for resume or stop while paused during restart delay.
+			if restartRequested.Load() {
+				restartRequested.Store(false)
 				select {
-				case <-resumeCh:
-					attempt = 0
-				case <-pauseCh:
-					if stopRequested.Load() {
-						exit := &state.Exit{Code: exitCode, ExitedAt: time.Now()}
-						_ = cfg.Store.WriteExit(cfg.Meta.ID, exit)
-						closeLogFile()
-						return nil
-					}
+				case <-restartCh:
+				default:
 				}
+				attempt = 0
 			}
 		}
 	}
@@ -359,8 +369,8 @@ func (cfg *Config) computeDelay(attempt int) time.Duration {
 }
 
 // runChild starts the child process, captures its output, and waits for it
-// to exit or be killed via pauseCh.
-func runChild(cfg *Config, logger *jsonlWriter, pauseCh <-chan struct{}, stopRequested *atomic.Bool) (int, error) {
+// to exit or be killed via stopCh.
+func runChild(cfg *Config, logger *jsonlWriter, stopCh <-chan struct{}, stopRequested *atomic.Bool) (int, error) {
 	cmd := buildCmd(cfg.Meta)
 
 	stdout, err := cmd.StdoutPipe()
@@ -376,8 +386,12 @@ func runChild(cfg *Config, logger *jsonlWriter, pauseCh <-chan struct{}, stopReq
 		return -1, fmt.Errorf("start: %w", err)
 	}
 
-	// Write child PID.
+	// Write child PID, start time, and OS create time (for PID reuse protection).
 	_ = cfg.Store.WritePID(cfg.Meta.ID, "child.pid", cmd.Process.Pid)
+	_ = cfg.Store.WriteChildStartTime(cfg.Meta.ID, time.Now())
+	if ct := process.CreateTime(cmd.Process.Pid); ct > 0 {
+		_ = cfg.Store.WriteChildCreateTime(cfg.Meta.ID, ct)
+	}
 
 	// Capture output concurrently.
 	var wg sync.WaitGroup
@@ -391,15 +405,24 @@ func runChild(cfg *Config, logger *jsonlWriter, pauseCh <-chan struct{}, stopReq
 		captureStream(stderr, "e", logger)
 	}()
 
-	// Monitor for pause/stop signal: kill the child if received.
+	// Monitor for stop/restart signal: kill the child if received.
 	var killed atomic.Bool
 	done := make(chan struct{})
 	go func() {
 		select {
-		case <-pauseCh:
+		case <-stopCh:
 			killed.Store(true)
 			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
+				// Try graceful termination first; escalate to SIGKILL after 5s.
+				_ = process.SignalTerm(cmd.Process.Pid)
+				timer := time.NewTimer(5 * time.Second)
+				select {
+				case <-done:
+					timer.Stop()
+					return
+				case <-timer.C:
+					_ = cmd.Process.Kill()
+				}
 			}
 		case <-done:
 		}

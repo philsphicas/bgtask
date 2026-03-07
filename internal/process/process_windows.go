@@ -11,38 +11,22 @@ import (
 )
 
 // IsAlive checks if a process with the given PID is still running.
-// On Windows, OpenProcess can succeed for non-existent PIDs when pid%4 != 0
-// (see https://devblogs.microsoft.com/oldnewthing/20080606-00/?p=22043),
-// so we enumerate all PIDs for those cases.
+// On Windows, OpenProcess can succeed for terminated processes (handle still
+// valid) and for non-existent PIDs when pid%4 != 0. We use WaitForSingleObject
+// with zero timeout to check if the process has actually exited.
 func IsAlive(pid int) bool {
 	if pid <= 0 {
 		return false
-	}
-	if pid%4 != 0 {
-		return pidInList(uint32(pid))
 	}
 	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
 	if err != nil {
 		return false
 	}
-	windows.CloseHandle(h)
-	return true
-}
-
-// pidInList checks if a PID exists by enumerating all process IDs.
-func pidInList(pid uint32) bool {
-	var pids [4096]uint32
-	var needed uint32
-	if err := windows.EnumProcesses(pids[:], &needed); err != nil {
-		return false
-	}
-	count := needed / 4
-	for i := uint32(0); i < count; i++ {
-		if pids[i] == pid {
-			return true
-		}
-	}
-	return false
+	defer windows.CloseHandle(h)
+	// WaitForSingleObject with 0 timeout returns WAIT_OBJECT_0 if the
+	// process has exited, WAIT_TIMEOUT if it's still running.
+	event, _ := windows.WaitForSingleObject(h, 0)
+	return event == uint32(windows.WAIT_TIMEOUT)
 }
 
 // CreateTime returns an opaque process start-time identifier for PID reuse

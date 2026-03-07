@@ -35,14 +35,14 @@ func Detach(args []string) (*os.Process, error) {
 	return &os.Process{Pid: pid}, nil
 }
 
-// SignalPause writes a pause command to the control file.
-func SignalPause(pid int) error {
-	return writeCtlFile(pid, "pause")
+// SignalRestart writes a restart command to the control file.
+func SignalRestart(pid int) error {
+	return writeCtlFile(pid, "restart")
 }
 
-// SignalResume writes a resume command to the control file.
-func SignalResume(pid int) error {
-	return writeCtlFile(pid, "resume")
+// SignalStop writes a stop command to the control file.
+func SignalStop(pid int) error {
+	return writeCtlFile(pid, "stop")
 }
 
 func writeCtlFile(pid int, action string) error {
@@ -84,6 +84,8 @@ func writeCtlFile(pid int, action string) error {
 			if err := os.WriteFile(tmpFile, []byte(action), 0o600); err != nil {
 				return err
 			}
+			// On Windows, os.Rename fails if destination exists.
+			_ = os.Remove(ctlFile)
 			return os.Rename(tmpFile, ctlFile)
 		}
 	}

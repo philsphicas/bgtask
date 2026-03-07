@@ -28,9 +28,10 @@ var CLI struct {
 	Status  StatusCmd  `cmd:"" help:"Show task details."`
 	Logs    LogsCmd    `cmd:"" help:"View task logs."`
 	Stop    StopCmd    `cmd:"" help:"Stop a task."`
-	Pause   PauseCmd   `cmd:"" help:"Pause a task (supervisor stays alive)."`
-	Resume  ResumeCmd  `cmd:"" help:"Resume a paused task."`
+	Restart RestartCmd `cmd:"" help:"Restart a running task."`
+	Start   StartCmd   `cmd:"" help:"Start a stopped task."`
 	Rename  RenameCmd  `cmd:"" help:"Rename a task."`
+	Label   LabelCmd   `cmd:"" help:"Set labels on a task."`
 	Rm      RmCmd      `cmd:"" help:"Stop and delete a task."`
 	Cleanup CleanupCmd `cmd:"" help:"Remove all non-running tasks."`
 

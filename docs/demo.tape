@@ -42,7 +42,7 @@ Type "# Curl the server using the detected port"
 Enter
 Sleep 500ms
 
-Type "curl -s --head http://localhost:$(bgtask status --json my-server | jq '.ports[0]')/ | head -n1"
+Type "curl -s --head http://localhost:$(bgtask status --json my-server | jq '.status.running.ports[0]')/ | head -n1"
 Enter
 Sleep 2s
 
@@ -54,6 +54,14 @@ Type "bgtask status my-server"
 Enter
 Sleep 3s
 
+Type "# Restart the task"
+Enter
+Sleep 500ms
+
+Type "bgtask restart my-server"
+Enter
+Sleep 2s
+
 Type "# Stop the task"
 Enter
 Sleep 500ms
@@ -62,11 +70,19 @@ Type "bgtask stop my-server"
 Enter
 Sleep 1.5s
 
-Type "# Logs persist after the task stops"
+Type "# Re-start the stopped task"
 Enter
 Sleep 500ms
 
-Type "bgtask logs my-server"
+Type "bgtask start my-server"
+Enter
+Sleep 1.5s
+
+Type "# Logs persist across restarts"
+Enter
+Sleep 500ms
+
+Type "bgtask logs --tail 5 my-server"
 Enter
 Sleep 2s
 
