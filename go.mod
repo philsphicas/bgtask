@@ -1,14 +1,14 @@
 module github.com/philsphicas/bgtask
 
-go 1.24.2
+go 1.25.0
 
 require (
-	charm.land/lipgloss/v2 v2.0.0
+	charm.land/lipgloss/v2 v2.0.1
 	github.com/alecthomas/kong v1.14.0
 	github.com/charmbracelet/x/term v0.2.2
-	github.com/mattn/go-runewidth v0.0.19
+	github.com/mattn/go-runewidth v0.0.21
 	github.com/willabides/kongplete v0.4.0
-	golang.org/x/sys v0.41.0
+	golang.org/x/sys v0.42.0
 )
 
 require (
@@ -29,5 +29,4 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/sync v0.18.0 // indirect
-	golang.org/x/term v0.40.0 // indirect
 )
