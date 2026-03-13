@@ -3,15 +3,24 @@
 package process
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
 // Detach starts a detached child process that survives the parent's exit.
+//
+// On Windows, SSH servers (OpenSSH) place child processes in a Job Object.
+// When the session closes, all processes in the job are terminated.
+// CREATE_BREAKAWAY_FROM_JOB allows the supervisor to escape this job,
+// surviving SSH disconnects. If the parent job doesn't allow breakaway,
+// we fall back to launching without it.
 func Detach(args []string) (*os.Process, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -20,14 +29,31 @@ func Detach(args []string) (*os.Process, error) {
 
 	cmd := exec.Command(exe, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | 0x00000008, // DETACHED_PROCESS
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP |
+			windows.DETACHED_PROCESS |
+			windows.CREATE_BREAKAWAY_FROM_JOB,
 	}
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start detached: %w", err)
+		// If breakaway is denied, retry without it. The supervisor may not
+		// survive session exit, but it will at least start.
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			cmd = exec.Command(exe, args...)
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+			}
+			cmd.Stdin = nil
+			cmd.Stdout = nil
+			cmd.Stderr = nil
+			if err := cmd.Start(); err != nil {
+				return nil, fmt.Errorf("start detached (fallback): %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("start detached: %w", err)
+		}
 	}
 
 	pid := cmd.Process.Pid
