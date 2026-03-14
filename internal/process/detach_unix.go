@@ -10,10 +10,12 @@ import (
 )
 
 // Detach starts a detached child process that survives the parent's exit.
-func Detach(args []string) (*os.Process, error) {
+// The returned bool indicates whether breakaway from the parent job failed;
+// on Unix this is always false.
+func Detach(args []string) (*os.Process, bool, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return nil, fmt.Errorf("resolve executable: %w", err)
+		return nil, false, fmt.Errorf("resolve executable: %w", err)
 	}
 
 	cmd := exec.Command(exe, args...)
@@ -25,12 +27,12 @@ func Detach(args []string) (*os.Process, error) {
 	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start detached: %w", err)
+		return nil, false, fmt.Errorf("start detached: %w", err)
 	}
 
 	pid := cmd.Process.Pid
 	_ = cmd.Process.Release()
-	return &os.Process{Pid: pid}, nil
+	return &os.Process{Pid: pid}, false, nil
 }
 
 // SignalRestart sends SIGHUP to a process (restart).
