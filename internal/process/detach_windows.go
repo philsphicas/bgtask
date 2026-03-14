@@ -15,50 +15,50 @@ import (
 )
 
 // Detach starts a detached child process that survives the parent's exit.
+// The returned bool indicates whether breakaway from the parent job failed;
+// when true the supervisor may not survive SSH session exit.
 //
 // On Windows, SSH servers (OpenSSH) place child processes in a Job Object.
 // When the session closes, all processes in the job are terminated.
 // CREATE_BREAKAWAY_FROM_JOB allows the supervisor to escape this job,
 // surviving SSH disconnects. If the parent job doesn't allow breakaway,
 // we fall back to launching without it.
-func Detach(args []string) (*os.Process, error) {
+func Detach(args []string) (*os.Process, bool, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return nil, fmt.Errorf("resolve executable: %w", err)
+		return nil, false, fmt.Errorf("resolve executable: %w", err)
 	}
 
-	cmd := exec.Command(exe, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP |
-			windows.DETACHED_PROCESS |
-			windows.CREATE_BREAKAWAY_FROM_JOB,
-	}
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	baseFlags := uint32(syscall.CREATE_NEW_PROCESS_GROUP) | windows.DETACHED_PROCESS
 
+	cmd := newDetachedCmd(exe, args, baseFlags|windows.CREATE_BREAKAWAY_FROM_JOB)
 	if err := cmd.Start(); err != nil {
-		// If breakaway is denied, retry without it. The supervisor may not
-		// survive session exit, but it will at least start.
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			cmd = exec.Command(exe, args...)
-			cmd.SysProcAttr = &syscall.SysProcAttr{
-				CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
-			}
-			cmd.Stdin = nil
-			cmd.Stdout = nil
-			cmd.Stderr = nil
-			if err := cmd.Start(); err != nil {
-				return nil, fmt.Errorf("start detached (fallback): %w", err)
-			}
-		} else {
-			return nil, fmt.Errorf("start detached: %w", err)
+		if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil, false, fmt.Errorf("start detached: %w", err)
 		}
+		// Breakaway denied — retry without it. The supervisor may not
+		// survive session exit, but it will at least start.
+		cmd = newDetachedCmd(exe, args, baseFlags)
+		if err := cmd.Start(); err != nil {
+			return nil, false, fmt.Errorf("start detached (fallback): %w", err)
+		}
+		pid := cmd.Process.Pid
+		_ = cmd.Process.Release()
+		return &os.Process{Pid: pid}, true, nil
 	}
 
 	pid := cmd.Process.Pid
 	_ = cmd.Process.Release()
-	return &os.Process{Pid: pid}, nil
+	return &os.Process{Pid: pid}, false, nil
+}
+
+func newDetachedCmd(exe string, args []string, flags uint32) *exec.Cmd {
+	cmd := exec.Command(exe, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd
 }
 
 // SignalRestart writes a restart command to the control file.

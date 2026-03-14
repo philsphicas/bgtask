@@ -143,13 +143,16 @@ func (r *RunCmd) Run(store *state.Store) error {
 
 	// Re-exec self as detached supervisor.
 	supervisorArgs := []string{"supervisor", store.Root, meta.ID}
-	proc, err := process.Detach(supervisorArgs)
+	proc, noBreakaway, err := process.Detach(supervisorArgs)
 	if err != nil {
 		_ = store.Remove(meta.ID)
 		return fmt.Errorf("detach supervisor: %w", err)
 	}
 
 	lipgloss.Printf("Started: %s (id: %s, pid: %d)\n", ui.Bold.Render(name), meta.ID, proc.Pid)
+	if noBreakaway {
+		fmt.Fprintf(os.Stderr, "warning: could not break away from job object; task may not survive session exit\n")
+	}
 
 	// Brief startup check: catch immediate failures (typos, missing commands).
 	// The supervisor writes exit.json within ~50ms for bad commands.
@@ -1005,12 +1008,15 @@ func (s *StartCmd) launchSupervisor(store *state.Store, id string, meta *state.M
 	}
 
 	supervisorArgs := []string{"supervisor", store.Root, id}
-	proc, err := process.Detach(supervisorArgs)
+	proc, noBreakaway, err := process.Detach(supervisorArgs)
 	if err != nil {
 		return fmt.Errorf("detach supervisor: %w", err)
 	}
 
 	lipgloss.Printf("Started: %s (pid: %d)\n", ui.Bold.Render(meta.Name), proc.Pid)
+	if noBreakaway {
+		fmt.Fprintf(os.Stderr, "warning: could not break away from job object; task may not survive session exit\n")
+	}
 	return nil
 }
 
