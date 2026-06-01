@@ -6,7 +6,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.3
 	github.com/alecthomas/kong v1.15.0
 	github.com/charmbracelet/x/term v0.2.2
-	github.com/mattn/go-runewidth v0.0.23
+	github.com/mattn/go-runewidth v0.0.24
 	github.com/willabides/kongplete v0.4.0
 	golang.org/x/sys v0.45.0
 )
