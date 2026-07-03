@@ -3,7 +3,7 @@ module github.com/philsphicas/bgtask
 go 1.25.0
 
 require (
-	charm.land/lipgloss/v2 v2.0.4
+	charm.land/lipgloss/v2 v2.0.5
 	github.com/alecthomas/kong v1.15.0
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/mattn/go-runewidth v0.0.24
