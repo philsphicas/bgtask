@@ -93,6 +93,20 @@ jobs:
             [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           fi
 
+      - name: Check out edge commit
+        if: inputs.channel == 'edge'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Check out stable commit
+        if: inputs.channel == 'stable'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
       - name: Download Linux amd64
         uses: actions/download-artifact@v8
         with:
@@ -144,14 +158,7 @@ jobs:
           sha256sum "${files[@]}" > "bgtask-${VERSION}-checksums.txt"
           sha256sum --check "bgtask-${VERSION}-checksums.txt"
 
-      - name: Check out edge commit
-        if: inputs.channel == 'edge'
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.commit_sha }}
-          fetch-depth: 0
-
-      - name: Require current main commit
+      - name: Require newest successful main commit
         if: inputs.channel == 'edge'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -165,6 +172,21 @@ jobs:
           )"
           if [[ "$COMMIT_SHA" != "$latest_successful_sha" ]]; then
             echo "::error::Refusing stale edge commit ${COMMIT_SHA}; the newest successful main CI commit is ${latest_successful_sha}."
+            exit 1
+          fi
+
+      - name: Require unchanged stable tag
+        if: inputs.channel == 'stable'
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin \
+            "refs/tags/${VERSION}:refs/tags/${VERSION}"
+          remote_tag_commit="$(git rev-parse "${VERSION}^{commit}")"
+          if [[ "$remote_tag_commit" != "$COMMIT_SHA" ]]; then
+            echo "::error::Tag ${VERSION} moved from ${COMMIT_SHA} to ${remote_tag_commit} while the release was building."
             exit 1
           fi
 
@@ -252,13 +274,6 @@ jobs:
               --latest=false
           fi
 
-      - name: Check out stable commit
-        if: inputs.channel == 'stable'
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.commit_sha }}
-          fetch-depth: 0
-
       - name: Publish immutable stable release
         if: inputs.channel == 'stable'
         env:
@@ -267,14 +282,6 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-
-          git fetch --force origin \
-            "refs/tags/${VERSION}:refs/tags/${VERSION}"
-          remote_tag_commit="$(git rev-parse "${VERSION}^{commit}")"
-          if [[ "$remote_tag_commit" != "$COMMIT_SHA" ]]; then
-            echo "::error::Tag ${VERSION} moved from ${COMMIT_SHA} to ${remote_tag_commit} while the release was building."
-            exit 1
-          fi
 
           stable_release_id="$(
             gh api --paginate \
