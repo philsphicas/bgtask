@@ -110,6 +110,54 @@ The server exposes these tools:
 MCP task creation does not replace a duplicate name unless
 `replace_existing: true` is explicitly supplied.
 
+## Start a one-off Copilot CLI agent
+
+Copilot CLI can add the bgtask MCP server for one session without changing the
+global MCP configuration:
+
+```powershell
+$wslIP = ((wsl.exe -- bash -lc 'hostname -I').Trim() -split '\s+')[0]
+$mcpConfig = @{
+  mcpServers = @{
+    bgtask = @{
+      type = "http"
+      url = "http://${wslIP}:8420/mcp"
+      tools = @("*")
+    }
+  }
+} | ConvertTo-Json -Depth 6 -Compress
+
+$prompt = @'
+Use only the bgtask MCP tools. Do not call shell, PowerShell, or wsl.exe.
+
+Start a bgtask named `quoting-proof` in `/tmp` with this argv list:
+["bash", "-lc", "printf 'value: <%s>\n' \"$DEMO_VALUE\"; printf 'alpha\nbeta\n' | grep beta"]
+Set DEMO_VALUE to `hello from MCP`, wait for the task to exit, then report its
+status and stdout.
+'@
+
+copilot -p $prompt `
+  --additional-mcp-config $mcpConfig `
+  --disable-builtin-mcps `
+  --allow-all-tools `
+  --no-custom-instructions `
+  --no-ask-user
+```
+
+In an end-to-end Windows-to-WSL run, the agent used exactly
+`bgtask_run` → `bgtask_get` → `bgtask_logs`; it did not invoke a shell tool or
+`wsl.exe`. The Linux task exited with code 0 and returned:
+
+```text
+value with spaces: <hello from MCP agent>
+pipe result: beta
+```
+
+The important difference from launching through `wsl.exe` is that
+`bgtask_run.command` is an argv-style JSON array. The shell program is one
+argument in that array, so it does not pass through nested PowerShell,
+`wsl.exe`, and Linux-shell quoting layers.
+
 ## Give an agent a task
 
 Once the MCP server is configured, prompts can describe the desired lifecycle
