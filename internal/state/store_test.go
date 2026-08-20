@@ -7,6 +7,31 @@ import (
 	"time"
 )
 
+func TestDefaultStoreStateDirOverride(t *testing.T) {
+	overrideDir := t.TempDir()
+	xdgDir := t.TempDir()
+	t.Setenv(stateDirOverrideEnv, overrideDir)
+	t.Setenv("XDG_CONFIG_HOME", xdgDir)
+
+	store, err := DefaultStore()
+	if err != nil {
+		t.Fatalf("DefaultStore: %v", err)
+	}
+
+	want := filepath.Join(overrideDir, "procs")
+	if store.Root != want {
+		t.Errorf("Root = %q, want %q", store.Root, want)
+	}
+	if info, err := os.Stat(want); err != nil {
+		t.Fatalf("stat override procs directory: %v", err)
+	} else if !info.IsDir() {
+		t.Errorf("%q is not a directory", want)
+	}
+	if _, err := os.Stat(filepath.Join(xdgDir, "bgtask", "procs")); !os.IsNotExist(err) {
+		t.Errorf("XDG_CONFIG_HOME directory was used despite state override: %v", err)
+	}
+}
+
 func TestStoreCreateAndRead(t *testing.T) {
 	dir := t.TempDir()
 	s := &Store{Root: dir}

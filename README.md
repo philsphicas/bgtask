@@ -195,6 +195,8 @@ When you run `bgtask run`, the CLI:
 
 State directory locations:
 
+`BGTASK_STATE_DIR` can be set to the state root that contains `procs/` and takes precedence over platform defaults.
+
 | Platform | Path                                    |
 | -------- | --------------------------------------- |
 | Linux    | `~/.config/bgtask/`                     |
