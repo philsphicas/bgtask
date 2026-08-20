@@ -150,9 +150,8 @@ Cleanup:
   Remove state for all non-running tasks. Running tasks are left alone.
 
 Serve:
-  Run bgtask as a foreground server exposing a REST API (and, once
-  implemented, an MCP endpoint) over HTTP instead of one process per
-  invocation.
+  Run bgtask as a foreground server exposing a REST API and/or MCP
+  Streamable HTTP endpoint instead of one process per invocation.
 
         --bind ADDR             Address to bind (default: 127.0.0.1)
         --port PORT             Port to listen on, 0 picks a free port (default: 8420)

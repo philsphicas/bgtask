@@ -53,6 +53,45 @@ func TestRun_InvalidLabelIsInvalidArgument(t *testing.T) {
 	}
 }
 
+func TestRun_InvalidLifecycleConfigurationIsInvalidArgument(t *testing.T) {
+	tests := []struct {
+		name   string
+		update func(*taskservice.RunRequest)
+	}{
+		{
+			name: "restart policy",
+			update: func(req *taskservice.RunRequest) {
+				req.Restart = "unless-stopped"
+			},
+		},
+		{
+			name: "negative restart delay",
+			update: func(req *taskservice.RunRequest) {
+				req.RestartDelay = -time.Second
+			},
+		},
+		{
+			name: "negative health interval",
+			update: func(req *taskservice.RunRequest) {
+				req.HealthInterval = -time.Second
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, _ := newTestService(t)
+			req := taskservice.RunRequest{Name: "invalid-config", Command: []string{"true"}}
+			tt.update(&req)
+
+			_, err := svc.Run(context.Background(), req)
+			if !taskservice.IsInvalidArgument(err) {
+				t.Fatalf("expected CodeInvalidArgument, got %v (code=%s)", err, taskservice.CodeOf(err))
+			}
+		})
+	}
+}
+
 func TestRun_DuplicateNameDefaultIsConflict(t *testing.T) {
 	svc, _ := newTestService(t)
 	mustRun(t, svc, "dup", []string{"sleep", "100"})

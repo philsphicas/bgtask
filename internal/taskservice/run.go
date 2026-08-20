@@ -48,6 +48,17 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 	if err := validation.ValidateLabels(req.Labels); err != nil {
 		return nil, InvalidArgument(op, name, "", err.Error())
 	}
+	switch req.Restart {
+	case "", "always", "on-failure":
+	default:
+		return nil, InvalidArgument(op, name, "", fmt.Sprintf("invalid restart policy %q (expected always or on-failure)", req.Restart))
+	}
+	if req.RestartDelay < 0 {
+		return nil, InvalidArgument(op, name, "", "restart delay must not be negative")
+	}
+	if req.HealthInterval < 0 {
+		return nil, InvalidArgument(op, name, "", "health interval must not be negative")
+	}
 
 	global, err := s.Store.LockContext(ctx)
 	if err != nil {
