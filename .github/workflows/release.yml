@@ -52,6 +52,7 @@ jobs:
   release:
     needs: validate
     permissions:
+      actions: read
       contents: write
     uses: ./.github/workflows/publish-binaries.yml
     with:
