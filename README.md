@@ -1,7 +1,6 @@
 # bgtask
 
 [![CI](https://github.com/philsphicas/bgtask/actions/workflows/ci.yml/badge.svg)](https://github.com/philsphicas/bgtask/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/philsphicas/bgtask)](https://goreportcard.com/report/github.com/philsphicas/bgtask)
 [![GitHub Release](https://img.shields.io/github/v/release/philsphicas/bgtask)](https://github.com/philsphicas/bgtask/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
