@@ -31,7 +31,16 @@ go install github.com/philsphicas/bgtask/cmd/bgtask@latest
 
 ### Pre-built binaries
 
-Download from [Releases](https://github.com/philsphicas/bgtask/releases) for Linux, macOS, and Windows (amd64/arm64).
+Download stable versions from [Releases](https://github.com/philsphicas/bgtask/releases).
+Stable releases are built from `vMAJOR.MINOR.PATCH` tags on `main` and are
+available for Linux and macOS (amd64/arm64) and Windows (amd64). Each release
+includes a SHA-256 checksum manifest.
+
+The rolling [`edge` prerelease](https://github.com/philsphicas/bgtask/releases/tag/edge)
+tracks the latest commit on `main` that passed CI. Edge builds are development
+snapshots for early testing: their tag and assets are replaced on each update,
+and support is best effort. Use a stable release for production or long-lived
+installations.
 
 ### Build locally
 
