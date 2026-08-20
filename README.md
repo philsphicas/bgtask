@@ -272,6 +272,8 @@ The MCP endpoint exposes:
 `bgtask_stop`, `bgtask_restart`, `bgtask_rename`, `bgtask_set_labels`,
 `bgtask_remove`, and `bgtask_cleanup`.
 
+![REST and MCP server demo](https://github.com/philsphicas/bgtask/releases/download/assets/server-demo.gif)
+
 Configure any MCP client that supports Streamable HTTP with:
 
 ```json
@@ -288,6 +290,10 @@ Configure any MCP client that supports Streamable HTTP with:
 MCP and REST log reads are bounded snapshots (default 200, maximum 5000);
 poll again for newer entries. The CLI remains the interface for following logs
 continuously with `bgtask logs -f`.
+
+See [Using bgtask from an agent](docs/agent-usage.md) for Windows-to-WSL setup,
+MCP configuration, tool descriptions, example agent prompts, and REST
+verification commands.
 
 > [!WARNING]
 > The server does not implement authentication or TLS. Binding to a
