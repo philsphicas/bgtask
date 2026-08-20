@@ -33,7 +33,7 @@ Sleep 1.5s
 
 Type "# An agent launches a Linux command through the REST API"
 Enter
-Type "curl -sS -X POST http://127.0.0.1:8420/api/v1/tasks -H 'Content-Type: application/json' -d '{\"name\":\"agent-job\",\"command\":[\"bash\",\"-lc\",\"echo from-agent; sleep 1; echo done\"],\"labels\":[\"agent\"]}' | jq '{id: .task.id, name: .task.name}'"
+Type `curl -sS -X POST http://127.0.0.1:8420/api/v1/tasks -H 'Content-Type: application/json' -d '{"name":"agent-job","command":["bash","-lc","echo from-agent; sleep 1; echo done"],"labels":["agent"]}' | jq '{id: .task.id, name: .task.name}'`
 Enter
 Sleep 2s
 
@@ -63,4 +63,3 @@ Sleep 1s
 Type "bgtask rm bgtask-api"
 Enter
 Sleep 2s
-
