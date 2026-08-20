@@ -19,9 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       commit_sha: ${{ steps.release.outputs.commit_sha }}
+      ready: ${{ steps.freshness.outputs.ready }}
       version: ${{ steps.release.outputs.version }}
     steps:
       - name: Require newest successful main CI run
+        id: freshness
         env:
           GH_TOKEN: ${{ github.token }}
           WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
@@ -34,11 +36,14 @@ jobs:
           )"
           if [[ "$WORKFLOW_RUN_ID" != "$latest_successful_run" ]]; then
             echo "::notice::A newer successful main CI run exists; skipping this stale edge candidate."
-            exit 1
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Set edge version
         id: release
+        if: steps.freshness.outputs.ready == 'true'
         env:
           COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
@@ -49,6 +54,7 @@ jobs:
 
   release:
     needs: prepare
+    if: needs.prepare.outputs.ready == 'true'
     permissions:
       actions: read
       contents: write
