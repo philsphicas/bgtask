@@ -1,0 +1,302 @@
+name: Publish Binaries
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: Publication channel (edge or stable)
+        required: true
+        type: string
+      version:
+        description: Version embedded in binaries and asset names
+        required: true
+        type: string
+      commit_sha:
+        description: Full commit SHA to build and publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    concurrency:
+      group: >-
+        ${{ inputs.channel == 'edge'
+          && format('edge-build-{0}-{1}', matrix.goos, matrix.goarch)
+          || format('stable-build-{0}-{1}-{2}', inputs.version, matrix.goos, matrix.goarch) }}
+      cancel-in-progress: ${{ inputs.channel == 'edge' }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Package binary
+        id: package
+        uses: ./.github/actions/package-binary
+        with:
+          version: ${{ inputs.version }}
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/${{ steps.package.outputs.asset }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    concurrency:
+      group: ${{ inputs.channel == 'edge' && 'edge-publish' || format('stable-publish-{0}', inputs.version) }}
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate publication inputs
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ inputs.version }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CHANNEL" == "edge" || "$CHANNEL" == "stable" ]]
+          [[ "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CHANNEL" == "edge" ]]; then
+            [[ "$VERSION" == "edge-${COMMIT_SHA:0:12}" ]]
+          else
+            [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          fi
+
+      - name: Download Linux amd64
+        uses: actions/download-artifact@v8
+        with:
+          name: bgtask-${{ inputs.version }}-linux-amd64.tar.gz
+          path: release-assets
+          skip-decompress: true
+
+      - name: Download Linux arm64
+        uses: actions/download-artifact@v8
+        with:
+          name: bgtask-${{ inputs.version }}-linux-arm64.tar.gz
+          path: release-assets
+          skip-decompress: true
+
+      - name: Download macOS amd64
+        uses: actions/download-artifact@v8
+        with:
+          name: bgtask-${{ inputs.version }}-darwin-amd64.tar.gz
+          path: release-assets
+          skip-decompress: true
+
+      - name: Download macOS arm64
+        uses: actions/download-artifact@v8
+        with:
+          name: bgtask-${{ inputs.version }}-darwin-arm64.tar.gz
+          path: release-assets
+          skip-decompress: true
+
+      - name: Download Windows amd64
+        uses: actions/download-artifact@v8
+        with:
+          name: bgtask-${{ inputs.version }}-windows-amd64.zip
+          path: release-assets
+          skip-decompress: true
+
+      - name: Create checksum manifest
+        env:
+          VERSION: ${{ inputs.version }}
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          files=(
+            "bgtask-${VERSION}-linux-amd64.tar.gz"
+            "bgtask-${VERSION}-linux-arm64.tar.gz"
+            "bgtask-${VERSION}-darwin-amd64.tar.gz"
+            "bgtask-${VERSION}-darwin-arm64.tar.gz"
+            "bgtask-${VERSION}-windows-amd64.zip"
+          )
+          sha256sum "${files[@]}" > "bgtask-${VERSION}-checksums.txt"
+          sha256sum --check "bgtask-${VERSION}-checksums.txt"
+
+      - name: Check out edge commit
+        if: inputs.channel == 'edge'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Require current main commit
+        if: inputs.channel == 'edge'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          latest_successful_sha="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+              --jq ".workflow_runs[0].head_sha"
+          )"
+          if [[ "$COMMIT_SHA" != "$latest_successful_sha" ]]; then
+            echo "::error::Refusing stale edge commit ${COMMIT_SHA}; the newest successful main CI commit is ${latest_successful_sha}."
+            exit 1
+          fi
+
+      - name: Publish rolling edge release
+        if: inputs.channel == 'edge'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          cat > edge-notes.md <<EOF
+          # Edge build
+
+          **Commit: \`${COMMIT_SHA}\`**
+
+          This rolling prerelease is rebuilt from the latest successfully validated commit on \`main\`.
+          Edge builds are short-lived development snapshots and receive best-effort support.
+          EOF
+
+          files=(
+            "release-assets/bgtask-${VERSION}-linux-amd64.tar.gz"
+            "release-assets/bgtask-${VERSION}-linux-arm64.tar.gz"
+            "release-assets/bgtask-${VERSION}-darwin-amd64.tar.gz"
+            "release-assets/bgtask-${VERSION}-darwin-arm64.tar.gz"
+            "release-assets/bgtask-${VERSION}-windows-amd64.zip"
+            "release-assets/bgtask-${VERSION}-checksums.txt"
+          )
+          expected_assets=()
+          for file in "${files[@]}"; do
+            expected_assets+=("${file##*/}")
+          done
+
+          edge_release_id="$(
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"edge\") | .id" |
+              head -n1
+          )"
+
+          if [[ -n "$edge_release_id" ]]; then
+            mapfile -t existing_assets < <(
+              gh release view edge --json assets --jq ".assets[].name"
+            )
+            for file in "${files[@]}"; do
+              asset="${file##*/}"
+              if ! printf "%s\n" "${existing_assets[@]}" | grep -Fxq "$asset"; then
+                gh release upload edge "$file"
+              fi
+            done
+
+            mapfile -t staged_assets < <(
+              gh release view edge --json assets --jq ".assets[].name"
+            )
+            for asset in "${expected_assets[@]}"; do
+              printf "%s\n" "${staged_assets[@]}" | grep -Fxq "$asset"
+            done
+
+            git tag --force edge "$COMMIT_SHA"
+            git push --force origin refs/tags/edge
+            gh release edit edge \
+              --verify-tag \
+              --title "bgtask edge" \
+              --notes-file edge-notes.md \
+              --prerelease \
+              --latest=false
+
+            mapfile -t published_assets < <(
+              gh release view edge --json assets --jq ".assets[].name"
+            )
+            for asset in "${published_assets[@]}"; do
+              if ! printf "%s\n" "${expected_assets[@]}" | grep -Fxq "$asset"; then
+                gh release delete-asset edge "$asset" --yes
+              fi
+            done
+          else
+            git tag --force edge "$COMMIT_SHA"
+            git push --force origin refs/tags/edge
+            gh release create edge "${files[@]}" \
+              --verify-tag \
+              --title "bgtask edge" \
+              --notes-file edge-notes.md \
+              --prerelease \
+              --latest=false
+          fi
+
+      - name: Check out stable commit
+        if: inputs.channel == 'stable'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Publish immutable stable release
+        if: inputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          git fetch --force origin \
+            "refs/tags/${VERSION}:refs/tags/${VERSION}"
+          remote_tag_commit="$(git rev-parse "${VERSION}^{commit}")"
+          if [[ "$remote_tag_commit" != "$COMMIT_SHA" ]]; then
+            echo "::error::Tag ${VERSION} moved from ${COMMIT_SHA} to ${remote_tag_commit} while the release was building."
+            exit 1
+          fi
+
+          stable_release_id="$(
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${VERSION}\") | .id" |
+              head -n1
+          )"
+          if [[ -n "$stable_release_id" ]]; then
+            echo "::error::Release ${VERSION} already exists; stable releases are never overwritten."
+            exit 1
+          fi
+
+          files=(
+            "release-assets/bgtask-${VERSION}-linux-amd64.tar.gz"
+            "release-assets/bgtask-${VERSION}-linux-arm64.tar.gz"
+            "release-assets/bgtask-${VERSION}-darwin-amd64.tar.gz"
+            "release-assets/bgtask-${VERSION}-darwin-arm64.tar.gz"
+            "release-assets/bgtask-${VERSION}-windows-amd64.zip"
+            "release-assets/bgtask-${VERSION}-checksums.txt"
+          )
+          gh release create "$VERSION" "${files[@]}" \
+            --verify-tag \
+            --generate-notes \
+            --notes "Built from commit \`${COMMIT_SHA}\`." \
+            --latest
