@@ -1,0 +1,94 @@
+name: Update Go Toolchain
+
+on:
+  schedule:
+    - cron: "0 10 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Determine Go update
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current="$(go list -m -f '{{.GoVersion}}')"
+          latest="$(go env GOVERSION)"
+          latest="${latest#go}"
+
+          if [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" != "$latest" ] ||
+             [ "$current" = "$latest" ]; then
+            echo "update-available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          IFS=. read -r current_major current_minor current_patch <<< "$current"
+          IFS=. read -r latest_major latest_minor latest_patch <<< "$latest"
+          if [ "$current_major" = "$latest_major" ] &&
+             [ "$current_minor" = "$latest_minor" ]; then
+            echo "is-patch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-patch=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "update-available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Require PR token
+        if: steps.version.outputs.update-available == 'true'
+        env:
+          TOKEN: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Set GO_TOOLCHAIN_UPDATER_TOKEN to a GitHub App token or fine-grained PAT with Contents and Pull requests read/write permissions."
+            exit 1
+          fi
+
+      - name: Update module metadata
+        if: steps.version.outputs.update-available == 'true'
+        run: |
+          go mod edit -go="${{ steps.version.outputs.latest }}"
+          go mod tidy
+
+      - name: Create pull request
+        id: pull-request
+        if: steps.version.outputs.update-available == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
+          branch: automation/go-toolchain
+          delete-branch: true
+          commit-message: "build: update Go toolchain to ${{ steps.version.outputs.latest }}"
+          title: "build: update Go toolchain to ${{ steps.version.outputs.latest }}"
+          body: |
+            Updates the `go` directive to Go ${{ steps.version.outputs.latest }} and runs `go mod tidy`.
+
+            Patch-level Go updates are eligible for auto-merge after required checks pass. Feature releases require review.
+          add-paths: |
+            go.mod
+            go.sum
+
+      - name: Enable auto-merge for patch updates
+        if: >
+          steps.version.outputs.is-patch == 'true' &&
+          (steps.pull-request.outputs.pull-request-operation == 'created' ||
+           steps.pull-request.outputs.pull-request-operation == 'updated')
+        env:
+          GH_TOKEN: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
+        run: gh pr merge --auto --squash "${{ steps.pull-request.outputs.pull-request-number }}"
