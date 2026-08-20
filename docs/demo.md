@@ -181,7 +181,7 @@ Port detection:
 
 State directory:
   Task state (meta.json, logs, PIDs) is stored per-platform:
-    Override: $BGTASK_STATE_DIR/procs/     (takes precedence when set)
+    Override: $BGTASK_STATE_DIR/procs/     (or %BGTASK_STATE_DIR%\procs\ on Windows; takes precedence when set)
     Linux:   ~/.config/bgtask/procs/    (or $XDG_CONFIG_HOME/bgtask/procs/)
     macOS:   ~/Library/Application Support/bgtask/procs/
     Windows: %APPDATA%\bgtask\procs\    (or %XDG_CONFIG_HOME%\bgtask\procs\)
