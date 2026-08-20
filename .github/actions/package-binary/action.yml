@@ -1,0 +1,68 @@
+name: Package binary
+description: Cross-build and package one bgtask release target
+
+inputs:
+  version:
+    description: Version embedded in the binary and bundle name
+    required: true
+  goos:
+    description: Target operating system
+    required: true
+  goarch:
+    description: Target architecture
+    required: true
+
+outputs:
+  asset:
+    description: Packaged release asset filename
+    value: ${{ steps.package.outputs.asset }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build and package
+      id: package
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        TARGET_OS: ${{ inputs.goos }}
+        TARGET_ARCH: ${{ inputs.goarch }}
+      run: |
+        set -euo pipefail
+
+        bundle="bgtask-${VERSION}-${TARGET_OS}-${TARGET_ARCH}"
+        stage="${RUNNER_TEMP}/${bundle}"
+        rm -rf "$stage"
+        mkdir -p "$stage" dist
+
+        extension=""
+        if [[ "$TARGET_OS" == "windows" ]]; then
+          extension=".exe"
+        fi
+
+        CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" \
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+          -o "${stage}/bgtask${extension}" ./cmd/bgtask
+
+        cp LICENSE README.md "$stage/"
+
+        if [[ "$TARGET_OS" == "windows" ]]; then
+          asset="${bundle}.zip"
+          find "$stage" -exec touch -t 198001010000 {} +
+          (
+            cd "$RUNNER_TEMP"
+            zip -X -q -r "${GITHUB_WORKSPACE}/dist/${asset}" "$bundle"
+          )
+        else
+          asset="${bundle}.tar.gz"
+          chmod 0755 "${stage}/bgtask"
+          tar --sort=name \
+            --mtime="UTC 1970-01-01" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -czf "dist/${asset}" \
+            -C "$RUNNER_TEMP" "$bundle"
+        fi
+
+        echo "asset=$asset" >> "$GITHUB_OUTPUT"
