@@ -1,11 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -17,8 +16,8 @@ import (
 	"github.com/philsphicas/bgtask/internal/process"
 	"github.com/philsphicas/bgtask/internal/state"
 	"github.com/philsphicas/bgtask/internal/supervisor"
+	"github.com/philsphicas/bgtask/internal/taskservice"
 	"github.com/philsphicas/bgtask/internal/ui"
-	"github.com/philsphicas/bgtask/internal/validation"
 )
 
 // RunCmd launches a command in the background.
@@ -35,10 +34,8 @@ type RunCmd struct {
 	Args           []string      `arg:"" optional:"" passthrough:"" help:"Command and arguments to run (after --)."`
 }
 
-func (r *RunCmd) Run(store *state.Store) error {
+func (r *RunCmd) Run(svc *taskservice.Service) error {
 	args := r.Args
-
-	name := r.Name
 
 	// Require "--" separator to prevent typos in flags from being silently
 	// swallowed as part of the command (e.g., --labels instead of --label).
@@ -59,7 +56,7 @@ func (r *RunCmd) Run(store *state.Store) error {
 		return fmt.Errorf("invalid --restart value %q (expected: always, on-failure)", r.Restart)
 	}
 
-	// Parse env overrides (before lock -- no store access needed).
+	// Parse env overrides.
 	envOverrides := make(map[string]string)
 	for _, e := range r.Env {
 		parts := strings.SplitN(e, "=", 2)
@@ -78,88 +75,29 @@ func (r *RunCmd) Run(store *state.Store) error {
 		}
 	}
 
-	if name == "" {
-		name = state.AutoName(args)
-	}
-
-	// Lock to ensure name uniqueness atomically with Create.
-	unlock, err := store.Lock()
+	result, err := svc.Run(context.Background(), taskservice.RunRequest{
+		Name:            r.Name,
+		Command:         args,
+		Cwd:             cwd,
+		EnvOverrides:    envOverrides,
+		Labels:          r.Labels,
+		Restart:         r.Restart,
+		RestartDelay:    r.RestartDelay,
+		HealthCheck:     r.Health,
+		HealthInterval:  r.HealthInterval,
+		AutoRm:          r.Rm,
+		ReplaceExisting: true, // preserve historical CLI behavior: replace a duplicate name
+	})
 	if err != nil {
-		return fmt.Errorf("acquire lock: %w", err)
-	}
-
-	if taken, err := store.IsNameTaken(name); err != nil {
-		unlock()
-		return err
-	} else if taken {
-		// Stop and remove the existing task.
-		existingID, _, resolveErr := store.Resolve(name)
-		if resolveErr != nil {
-			unlock()
-			return resolveErr
-		}
-		pid, alive := verifyAndGetPID(store, existingID)
-		// Release the lock before potentially slow graceful stop.
-		unlock()
-		if alive {
-			gracefulStopTask(store, existingID, pid, 10*time.Second)
-		}
-		_ = store.Remove(existingID)
-		// Re-acquire lock for Create.
-		unlock, err = store.Lock()
-		if err != nil {
-			return fmt.Errorf("re-acquire lock: %w", err)
-		}
-	}
-
-	if err := validation.ValidateLabels(r.Labels); err != nil {
-		unlock()
 		return err
 	}
 
-	meta := &state.Meta{
-		ID:             state.GenerateID(),
-		Name:           name,
-		Command:        args,
-		Cwd:            cwd,
-		EnvOverrides:   envOverrides,
-		Labels:         r.Labels,
-		Restart:        r.Restart,
-		RestartDelay:   r.RestartDelay,
-		HealthCheck:    r.Health,
-		HealthInterval: r.HealthInterval,
-		AutoRm:         r.Rm,
-		CreatedAt:      time.Now(),
-	}
-
-	if err := store.Create(meta); err != nil {
-		unlock()
-		return err
-	}
-
-	// Release lock -- name is reserved. The rest (detach, startup check)
-	// does not need atomicity.
-	unlock()
-
-	// Re-exec self as detached supervisor.
-	supervisorArgs := []string{"supervisor", store.Root, meta.ID}
-	proc, noBreakaway, err := process.Detach(supervisorArgs)
-	if err != nil {
-		_ = store.Remove(meta.ID)
-		return fmt.Errorf("detach supervisor: %w", err)
-	}
-
-	lipgloss.Printf("Started: %s (id: %s, pid: %d)\n", ui.Bold.Render(name), meta.ID, proc.Pid)
-	if noBreakaway {
+	lipgloss.Printf("Started: %s (id: %s, pid: %d)\n", ui.Bold.Render(result.Task.Meta.Name), result.Task.ID, result.PID)
+	if result.NoBreakaway {
 		fmt.Fprintf(os.Stderr, "warning: could not break away from job object; task may not survive session exit\n")
 	}
-
-	// Brief startup check: catch immediate failures (typos, missing commands).
-	// The supervisor writes exit.json within ~50ms for bad commands.
-	time.Sleep(100 * time.Millisecond)
-	exit, _ := store.ReadExit(meta.ID)
-	if exit != nil && exit.Code != 0 {
-		fmt.Fprintf(os.Stderr, "warning: task exited immediately (code %d). Check: bgtask logs %s\n", exit.Code, name)
+	if result.ImmediateExit != nil && result.ImmediateExit.Code != 0 {
+		fmt.Fprintf(os.Stderr, "warning: task exited immediately (code %d). Check: bgtask logs %s\n", result.ImmediateExit.Code, result.Task.Meta.Name)
 	}
 
 	return nil
@@ -173,19 +111,10 @@ type LsCmd struct {
 	NoTrunc bool     `help:"Do not truncate command output."`
 }
 
-func (l *LsCmd) Run(store *state.Store) error {
-	ids, err := store.ListIDs()
+func (l *LsCmd) Run(svc *taskservice.Service) error {
+	result, err := svc.List(context.Background(), taskservice.ListRequest{Labels: l.Labels})
 	if err != nil {
 		return err
-	}
-
-	if len(ids) == 0 {
-		if !l.JSON {
-			fmt.Println("No tasks.")
-		} else {
-			fmt.Println("[]")
-		}
-		return nil
 	}
 
 	type taskInfo struct {
@@ -197,27 +126,15 @@ func (l *LsCmd) Run(store *state.Store) error {
 		Command   []string         `json:"command"`
 	}
 
-	tasks := make([]taskInfo, 0)
-	for _, id := range ids {
-		meta, err := store.ReadMeta(id)
-		if err != nil {
-			continue
-		}
-
-		// Filter by label if specified (OR semantics: match any).
-		if len(l.Labels) > 0 && !hasAnyLabel(meta.Labels, l.Labels) {
-			continue
-		}
-
-		ts := resolveTaskStatus(store, id)
-
+	tasks := make([]taskInfo, 0, len(result.Tasks))
+	for _, t := range result.Tasks {
 		tasks = append(tasks, taskInfo{
-			Name:      meta.Name,
-			ID:        id,
-			Status:    ts,
-			Labels:    meta.Labels,
-			CreatedAt: meta.CreatedAt,
-			Command:   meta.Command,
+			Name:      t.Meta.Name,
+			ID:        t.ID,
+			Status:    t.Status,
+			Labels:    t.Meta.Labels,
+			CreatedAt: t.Meta.CreatedAt,
+			Command:   t.Meta.Command,
 		})
 	}
 
@@ -229,7 +146,14 @@ func (l *LsCmd) Run(store *state.Store) error {
 
 	if len(tasks) == 0 {
 		if len(l.Labels) > 0 {
-			fmt.Println("No tasks with the specified label(s).")
+			// Distinguish "the store is empty" from "nothing matched the
+			// label filter" -- both print a different message.
+			all, err := svc.List(context.Background(), taskservice.ListRequest{})
+			if err == nil && len(all.Tasks) == 0 {
+				fmt.Println("No tasks.")
+			} else {
+				fmt.Println("No tasks with the specified label(s).")
+			}
 		} else {
 			fmt.Println("No tasks.")
 		}
@@ -429,13 +353,14 @@ type StatusCmd struct {
 	JSON bool   `short:"j" help:"Output as JSON." json:"-"`
 }
 
-func (s *StatusCmd) Run(store *state.Store) error {
-	id, meta, err := store.Resolve(s.Name)
+func (s *StatusCmd) Run(svc *taskservice.Service) error {
+	result, err := svc.Get(context.Background(), s.Name)
 	if err != nil {
 		return err
 	}
-
-	ts := resolveTaskStatus(store, id)
+	id := result.Task.ID
+	meta := result.Task.Meta
+	ts := result.Task.Status
 
 	if s.JSON {
 		info := map[string]interface{}{
@@ -446,7 +371,7 @@ func (s *StatusCmd) Run(store *state.Store) error {
 			"created_at": meta.CreatedAt,
 			"restart":    meta.Restart,
 			"status":     ts,
-			"log":        store.OutputPath(id),
+			"log":        result.Task.LogPath,
 		}
 		if len(meta.EnvOverrides) > 0 {
 			info["env_overrides"] = meta.EnvOverrides
@@ -517,7 +442,7 @@ func (s *StatusCmd) Run(store *state.Store) error {
 			kv("Signal:    ", ts.Exited.Signal)
 		}
 	}
-	kv("Log:       ", store.OutputPath(id))
+	kv("Log:       ", result.Task.LogPath)
 
 	if len(meta.EnvOverrides) > 0 {
 		lipgloss.Println(ui.Label.Render("Env overrides:"))
@@ -534,55 +459,6 @@ func styledAlive(alive bool) string {
 		return ui.Green.Render("running")
 	}
 	return ui.Red.Render("dead")
-}
-
-// resolveTaskStatus builds a TaskStatus for a given task ID.
-func resolveTaskStatus(store *state.Store, id string) state.TaskStatus {
-	exit, _ := store.ReadExit(id)
-
-	if exit != nil {
-		return state.TaskStatus{
-			State: "exited",
-			Exited: &state.ExitedInfo{
-				Code:   exit.Code,
-				Signal: exit.Signal,
-				At:     exit.ExitedAt,
-			},
-		}
-	}
-
-	pid, alive := verifyAndGetPID(store, id)
-	if pid > 0 {
-		if alive {
-			childPID, _ := store.ReadPID(id, "child.pid")
-			var ports []uint32
-			if childPID > 0 {
-				ports = process.ListeningPorts(childPID)
-			}
-			since := store.ReadChildStartTime(id)
-			var sincePtr *time.Time
-			if !since.IsZero() {
-				sincePtr = &since
-			}
-			return state.TaskStatus{
-				State: "running",
-				Running: &state.RunningInfo{
-					SupervisorPID: pid,
-					ChildPID:      childPID,
-					Ports:         ports,
-					Since:         sincePtr,
-				},
-			}
-		}
-		return state.TaskStatus{
-			State: "dead",
-			Dead: &state.DeadInfo{
-				Message: "supervisor process no longer exists",
-			},
-		}
-	}
-
-	return state.TaskStatus{State: "unknown"}
 }
 
 // statusDisplayString returns a compact status string for table display,
@@ -625,24 +501,19 @@ type LogsCmd struct {
 	Timestamps bool          `short:"T" help:"Prefix each line with its timestamp."`
 }
 
-func (l *LogsCmd) Run(store *state.Store) error {
-	if l.Stdout && l.Stderr {
-		return fmt.Errorf("--stdout and --stderr are mutually exclusive")
-	}
-
-	id, _, err := store.Resolve(l.Name)
+func (l *LogsCmd) Run(svc *taskservice.Service) error {
+	result, err := svc.Logs(context.Background(), taskservice.LogsRequest{
+		Ref:    l.Name,
+		Tail:   l.Tail,
+		Since:  l.Since,
+		All:    l.All,
+		Stdout: l.Stdout,
+		Stderr: l.Stderr,
+	})
 	if err != nil {
 		return err
 	}
-
-	// Default to current run only; --all shows everything.
-	var sinceTime time.Time
-	if !l.All {
-		sinceTime = store.ReadChildStartTime(id)
-	}
-
-	exitPath := filepath.Join(store.TaskDir(id), "exit.json")
-	return showLogs(store.ListLogFiles(id), exitPath, l.Follow, l.Tail, l.Since, sinceTime, l.Stdout, l.Stderr, l.Timestamps)
+	return showLogs(result, l.Follow, l.Stdout, l.Stderr, l.Timestamps)
 }
 
 // StopCmd stops a running task.
@@ -654,192 +525,49 @@ type StopCmd struct {
 	All     bool          `short:"a" help:"Stop all running tasks."`
 }
 
-func (s *StopCmd) Run(store *state.Store) error {
+func (s *StopCmd) Run(svc *taskservice.Service) error {
 	if len(s.Name) == 0 && len(s.Labels) == 0 && !s.All {
 		return fmt.Errorf("provide a task name, --labels, or --all")
 	}
 
-	if s.All {
-		return s.stopAll(store)
-	}
-
-	if len(s.Labels) > 0 {
-		return s.stopByLabel(store)
-	}
-
-	for _, name := range s.Name {
-		if err := s.stopOne(store, name); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *StopCmd) stopAll(store *state.Store) error {
-	ids, err := store.ListIDs()
-	if err != nil {
+	sel := taskservice.Selection{Names: s.Name, Labels: s.Labels, All: s.All}
+	result, err := svc.Stop(context.Background(), taskservice.StopRequest{
+		Selection: sel,
+		Force:     s.Force,
+		Timeout:   s.Timeout,
+	})
+	bulk := len(s.Name) == 0
+	if err != nil && !bulk {
 		return err
 	}
+	if result == nil {
+		return err
+	}
+
 	stopped := 0
-	for _, id := range ids {
-		meta, err := store.ReadMeta(id)
-		if err != nil {
+	for _, item := range result.Items {
+		switch {
+		case item.Err != nil:
+			// Only reachable for a bulk (labels/all) selection, where
+			// individual failures are tolerated and simply not counted.
 			continue
-		}
-		pid, alive := verifyAndGetPID(store, id)
-		if alive {
-			if err := s.signalAndWait(store, id, pid); err == nil {
-				lipgloss.Printf("Stopped: %s\n", ui.Bold.Render(meta.Name))
-				stopped++
+		case item.Result.NoOp:
+			if !bulk {
+				fmt.Printf("Task %s is not running.\n", item.Task.Meta.Name)
 			}
+		case item.Result.Changed:
+			lipgloss.Printf("Stopped: %s\n", ui.Bold.Render(item.Task.Meta.Name))
+			stopped++
 		}
 	}
-	if stopped == 0 {
-		fmt.Println("No running tasks.")
+	if bulk && stopped == 0 {
+		if len(s.Labels) > 0 {
+			fmt.Printf("No running tasks with the specified label(s).\n")
+		} else {
+			fmt.Println("No running tasks.")
+		}
 	}
 	return nil
-}
-
-func (s *StopCmd) stopByLabel(store *state.Store) error {
-	ids, err := store.ListIDs()
-	if err != nil {
-		return err
-	}
-	stopped := 0
-	for _, id := range ids {
-		meta, err := store.ReadMeta(id)
-		if err != nil || !hasAnyLabel(meta.Labels, s.Labels) {
-			continue
-		}
-		pid, alive := verifyAndGetPID(store, id)
-		if alive {
-			if err := s.signalAndWait(store, id, pid); err == nil {
-				lipgloss.Printf("Stopped: %s\n", ui.Bold.Render(meta.Name))
-				stopped++
-			}
-		}
-	}
-	if stopped == 0 {
-		fmt.Printf("No running tasks with the specified label(s).\n")
-	}
-	return nil
-}
-
-func (s *StopCmd) stopOne(store *state.Store, nameOrID string) error {
-	id, meta, err := store.Resolve(nameOrID)
-	if err != nil {
-		return err
-	}
-
-	pid, alive := verifyAndGetPID(store, id)
-	if !alive {
-		fmt.Printf("Task %s is not running.\n", meta.Name)
-		return nil
-	}
-
-	if err := s.signalAndWait(store, id, pid); err != nil {
-		return err
-	}
-
-	lipgloss.Printf("Stopped: %s\n", ui.Bold.Render(meta.Name))
-	return nil
-}
-
-func (s *StopCmd) signalAndWait(store *state.Store, id string, pid int) error {
-	if s.Force {
-		_ = process.SignalKill(pid)
-		killChildIfVerified(store, id)
-		return nil
-	}
-	gracefulStopTask(store, id, pid, s.Timeout)
-	return nil
-}
-
-// verifyAndGetPID reads the supervisor PID and verifies it hasn't been reused.
-// Returns the PID and true if the process is alive and verified.
-func verifyAndGetPID(store *state.Store, id string) (int, bool) {
-	pid, err := store.ReadPID(id, "supervisor.pid")
-	if err != nil || pid <= 0 {
-		return 0, false
-	}
-	if !process.IsAlive(pid) {
-		return pid, false
-	}
-	savedCreate := store.ReadCreateTime(id)
-	if !process.VerifyPID(pid, savedCreate) {
-		return pid, false
-	}
-	return pid, true
-}
-
-// killChildIfVerified kills the child process only after verifying the PID
-// hasn't been reused by an unrelated process (via create-time comparison).
-func killChildIfVerified(store *state.Store, id string) {
-	childPID, _ := store.ReadPID(id, "child.pid")
-	if childPID <= 0 || !process.IsAlive(childPID) {
-		return
-	}
-	savedCreate := store.ReadChildCreateTime(id)
-	if process.VerifyPID(childPID, savedCreate) {
-		_ = process.SignalKill(childPID)
-	}
-}
-
-// gracefulStopTask sends a stop signal to the supervisor, waits up to the
-// given timeout, then escalates to SIGKILL. Also terminates the child process
-// to prevent orphans.
-func gracefulStopTask(store *state.Store, id string, supervisorPID int, timeout time.Duration) {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-
-	if runtime.GOOS == "windows" {
-		// On Windows, TerminateProcess kills instantly without cleanup.
-		// Try the ctl file first for graceful shutdown, then fall back to
-		// TerminateProcess if the supervisor doesn't exit within the timeout.
-		ctlWorked := false
-		if err := process.SignalStop(supervisorPID); err == nil {
-			ctlTicks := int(timeout / (100 * time.Millisecond))
-			if ctlTicks < 1 {
-				ctlTicks = 1
-			}
-			for i := 0; i < ctlTicks; i++ {
-				if !process.IsAlive(supervisorPID) {
-					ctlWorked = true
-					break
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-		if !ctlWorked {
-			_ = process.SignalTerm(supervisorPID)
-			time.Sleep(200 * time.Millisecond)
-		}
-	} else {
-		_ = process.SignalTerm(supervisorPID)
-	}
-
-	// Wait for the process to exit (may already be done from ctl file path).
-	ticks := int(timeout / (100 * time.Millisecond))
-	if ticks < 1 {
-		ticks = 1
-	}
-	for i := 0; i < ticks; i++ {
-		if !process.IsAlive(supervisorPID) {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if process.IsAlive(supervisorPID) {
-		_ = process.SignalKill(supervisorPID)
-		// On Windows, give the OS a moment to finalize process termination.
-		if runtime.GOOS == "windows" {
-			time.Sleep(500 * time.Millisecond)
-		}
-	}
-	// Ensure child is also terminated in case the supervisor didn't have
-	// a chance to clean up (e.g., it was killed by SIGKILL escalation).
-	killChildIfVerified(store, id)
 }
 
 // RestartCmd restarts a running task (kills child, respawns immediately).
@@ -849,76 +577,44 @@ type RestartCmd struct {
 	Force  bool     `help:"Force restart (SIGKILL child)."`
 }
 
-func (r *RestartCmd) Run(store *state.Store) error {
+func (r *RestartCmd) Run(svc *taskservice.Service) error {
 	if len(r.Name) == 0 && len(r.Labels) == 0 {
 		return fmt.Errorf("provide a task name or --labels")
 	}
 
-	if len(r.Labels) > 0 {
-		return r.restartByLabel(store)
-	}
-
-	for _, name := range r.Name {
-		if err := r.restartOne(store, name); err != nil {
-			return err
+	sel := taskservice.Selection{Names: r.Name, Labels: r.Labels}
+	result, err := svc.Restart(context.Background(), taskservice.RestartRequest{Selection: sel, Force: r.Force})
+	bulk := len(r.Name) == 0
+	if err != nil && !bulk {
+		if taskservice.IsFailedPrecondition(err) && result != nil && len(result.Items) > 0 {
+			last := result.Items[len(result.Items)-1]
+			name := last.Ref
+			if last.Task != nil {
+				name = last.Task.Meta.Name
+			}
+			return fmt.Errorf("task %s is not running; use \"bgtask start %s\" to re-launch it", name, name)
 		}
-	}
-	return nil
-}
-
-func (r *RestartCmd) restartByLabel(store *state.Store) error {
-	ids, err := store.ListIDs()
-	if err != nil {
 		return err
 	}
+	if result == nil {
+		return err
+	}
+
 	restarted := 0
-	for _, id := range ids {
-		meta, err := store.ReadMeta(id)
-		if err != nil || !hasAnyLabel(meta.Labels, r.Labels) {
+	for _, item := range result.Items {
+		if item.Err != nil {
+			// Bulk selection: not-running/not-found tasks are silently
+			// skipped, matching the CLI's historical behavior.
 			continue
 		}
-		pid, alive := verifyAndGetPID(store, id)
-		if !alive {
-			continue
-		}
-		if err := r.sendRestart(store, id, pid); err == nil {
-			lipgloss.Printf("Restarted: %s\n", ui.Bold.Render(meta.Name))
+		if item.Result.Changed {
+			lipgloss.Printf("Restarted: %s\n", ui.Bold.Render(item.Task.Meta.Name))
 			restarted++
 		}
 	}
-	if restarted == 0 {
+	if bulk && restarted == 0 {
 		fmt.Printf("No running tasks with the specified label(s).\n")
 	}
-	return nil
-}
-
-func (r *RestartCmd) restartOne(store *state.Store, nameOrID string) error {
-	id, meta, err := store.Resolve(nameOrID)
-	if err != nil {
-		return err
-	}
-
-	pid, alive := verifyAndGetPID(store, id)
-	if !alive {
-		return fmt.Errorf("task %s is not running; use \"bgtask start %s\" to re-launch it", meta.Name, meta.Name)
-	}
-
-	if err := r.sendRestart(store, id, pid); err != nil {
-		return err
-	}
-
-	lipgloss.Printf("Restarted: %s\n", ui.Bold.Render(meta.Name))
-	return nil
-}
-
-func (r *RestartCmd) sendRestart(store *state.Store, id string, pid int) error {
-	if r.Force {
-		killChildIfVerified(store, id)
-	}
-	if err := process.SignalRestart(pid); err != nil {
-		return fmt.Errorf("send restart signal: %w", err)
-	}
-	time.Sleep(200 * time.Millisecond)
 	return nil
 }
 
@@ -928,94 +624,44 @@ type StartCmd struct {
 	Labels []string `short:"l" name:"labels" help:"Start all stopped tasks with this label (repeatable)."`
 }
 
-func (s *StartCmd) Run(store *state.Store) error {
+func (s *StartCmd) Run(svc *taskservice.Service) error {
 	if len(s.Name) == 0 && len(s.Labels) == 0 {
 		return fmt.Errorf("provide a task name or --labels")
 	}
 
-	if len(s.Labels) > 0 {
-		return s.startByLabel(store)
-	}
-
-	for _, name := range s.Name {
-		if err := s.startOne(store, name); err != nil {
-			return err
+	sel := taskservice.Selection{Names: s.Name, Labels: s.Labels}
+	result, err := svc.Start(context.Background(), taskservice.StartRequest{Selection: sel})
+	bulk := len(s.Name) == 0
+	if err != nil && !bulk {
+		if taskservice.IsFailedPrecondition(err) && result != nil && len(result.Items) > 0 {
+			last := result.Items[len(result.Items)-1]
+			name := last.Ref
+			if last.Task != nil {
+				name = last.Task.Meta.Name
+			}
+			return fmt.Errorf("task %s is already running", name)
 		}
-	}
-	return nil
-}
-
-func (s *StartCmd) startByLabel(store *state.Store) error {
-	// Lock to prevent concurrent starts from spawning duplicate supervisors.
-	unlock, err := store.Lock()
-	if err != nil {
-		return fmt.Errorf("acquire lock: %w", err)
-	}
-	defer unlock()
-
-	ids, err := store.ListIDs()
-	if err != nil {
 		return err
 	}
+	if result == nil {
+		return err
+	}
+
 	started := 0
-	for _, id := range ids {
-		meta, err := store.ReadMeta(id)
-		if err != nil || !hasAnyLabel(meta.Labels, s.Labels) {
+	for _, item := range result.Items {
+		if item.Err != nil {
+			// Bulk selection: already-running/not-found tasks are silently
+			// skipped, matching the CLI's historical behavior.
 			continue
 		}
-		_, alive := verifyAndGetPID(store, id)
-		if alive {
-			continue // already running
+		lipgloss.Printf("Started: %s (pid: %d)\n", ui.Bold.Render(item.Task.Meta.Name), item.Result.PID)
+		if item.Result.NoBreakaway {
+			fmt.Fprintf(os.Stderr, "warning: could not break away from job object; task may not survive session exit\n")
 		}
-		if err := s.launchSupervisor(store, id, meta); err == nil {
-			started++
-		}
+		started++
 	}
-	if started == 0 {
+	if bulk && started == 0 {
 		fmt.Printf("No stopped tasks with the specified label(s).\n")
-	}
-	return nil
-}
-
-func (s *StartCmd) startOne(store *state.Store, nameOrID string) error {
-	// Lock to prevent concurrent starts from spawning duplicate supervisors.
-	unlock, err := store.Lock()
-	if err != nil {
-		return fmt.Errorf("acquire lock: %w", err)
-	}
-	defer unlock()
-
-	id, meta, err := store.Resolve(nameOrID)
-	if err != nil {
-		return err
-	}
-
-	_, alive := verifyAndGetPID(store, id)
-	if alive {
-		return fmt.Errorf("task %s is already running", meta.Name)
-	}
-
-	return s.launchSupervisor(store, id, meta)
-}
-
-func (s *StartCmd) launchSupervisor(store *state.Store, id string, meta *state.Meta) error {
-	// Kill any orphan child from a dead supervisor.
-	killChildIfVerified(store, id)
-
-	// Clear previous exit state so the supervisor starts fresh.
-	if err := store.ClearExit(id); err != nil {
-		return fmt.Errorf("clear exit state: %w", err)
-	}
-
-	supervisorArgs := []string{"supervisor", store.Root, id}
-	proc, noBreakaway, err := process.Detach(supervisorArgs)
-	if err != nil {
-		return fmt.Errorf("detach supervisor: %w", err)
-	}
-
-	lipgloss.Printf("Started: %s (pid: %d)\n", ui.Bold.Render(meta.Name), proc.Pid)
-	if noBreakaway {
-		fmt.Fprintf(os.Stderr, "warning: could not break away from job object; task may not survive session exit\n")
 	}
 	return nil
 }
@@ -1026,25 +672,9 @@ type RenameCmd struct {
 	NewName string `arg:"" help:"New name for the task."`
 }
 
-func (r *RenameCmd) Run(store *state.Store) error {
-	unlock, err := store.Lock()
+func (r *RenameCmd) Run(svc *taskservice.Service) error {
+	_, err := svc.Rename(context.Background(), taskservice.RenameRequest{Ref: r.OldName, NewName: r.NewName})
 	if err != nil {
-		return fmt.Errorf("acquire lock: %w", err)
-	}
-	defer unlock()
-
-	id, _, err := store.Resolve(r.OldName)
-	if err != nil {
-		return err
-	}
-
-	if taken, err := store.IsNameTaken(r.NewName); err != nil {
-		return err
-	} else if taken {
-		return fmt.Errorf("name %q is already in use", r.NewName)
-	}
-
-	if err := store.Rename(id, r.NewName); err != nil {
 		return err
 	}
 
@@ -1058,15 +688,9 @@ type LabelCmd struct {
 	Labels []string `arg:"" optional:"" help:"Labels to set (replaces existing labels)."`
 }
 
-func (l *LabelCmd) Run(store *state.Store) error {
-	id, _, err := store.Resolve(l.Name)
+func (l *LabelCmd) Run(svc *taskservice.Service) error {
+	_, err := svc.SetLabels(context.Background(), taskservice.SetLabelsRequest{Ref: l.Name, Labels: l.Labels})
 	if err != nil {
-		return err
-	}
-	if err := validation.ValidateLabels(l.Labels); err != nil {
-		return err
-	}
-	if err := store.SetLabels(id, l.Labels); err != nil {
 		return err
 	}
 	if len(l.Labels) == 0 {
@@ -1085,167 +709,78 @@ type RmCmd struct {
 	All    bool     `short:"a" help:"Remove all tasks."`
 }
 
-func (r *RmCmd) Run(store *state.Store) error {
+func (r *RmCmd) Run(svc *taskservice.Service) error {
 	if len(r.Name) == 0 && len(r.Labels) == 0 && !r.All {
 		return fmt.Errorf("provide a task name, --labels, or --all")
 	}
 
-	if r.All {
-		return r.rmAll(store)
+	sel := taskservice.Selection{Names: r.Name, Labels: r.Labels, All: r.All}
+	result, err := svc.Remove(context.Background(), taskservice.RemoveRequest{Selection: sel, Force: r.Force})
+	bulk := len(r.Name) == 0
+	if err != nil && !bulk {
+		return err
 	}
-
-	if len(r.Labels) > 0 {
-		return r.rmByLabel(store)
-	}
-
-	for _, name := range r.Name {
-		if err := r.rmOne(store, name); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (r *RmCmd) rmAll(store *state.Store) error {
-	ids, err := store.ListIDs()
-	if err != nil {
+	if result == nil {
 		return err
 	}
 
-	if len(ids) == 0 {
-		fmt.Println("No tasks to remove.")
-		return nil
-	}
-
-	removed := 0
-	for _, id := range ids {
-		meta, err := store.ReadMeta(id)
-		if err != nil {
-			continue
-		}
-		pid, alive := verifyAndGetPID(store, id)
-		if alive {
-			if r.Force {
-				_ = process.SignalKill(pid)
-				killChildIfVerified(store, id)
-			} else {
-				gracefulStopTask(store, id, pid, 10*time.Second)
-			}
-		}
-		if err := store.Remove(id); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to remove %s: %v\n", meta.Name, err)
-			continue
-		}
-		lipgloss.Printf("Removed: %s\n", ui.Bold.Render(meta.Name))
-		removed++
-	}
-	if removed == 0 {
-		fmt.Println("No tasks to remove.")
-	}
-	return nil
-}
-
-func (r *RmCmd) rmByLabel(store *state.Store) error {
-	ids, err := store.ListIDs()
-	if err != nil {
-		return err
-	}
-
-	// Collect matching candidates first.
-	type candidate struct {
-		id   string
-		meta *state.Meta
-	}
-	var candidates []candidate
-	for _, id := range ids {
-		meta, err := store.ReadMeta(id)
-		if err != nil || !hasAnyLabel(meta.Labels, r.Labels) {
-			continue
-		}
-		candidates = append(candidates, candidate{id, meta})
-	}
-
-	if len(candidates) == 0 {
-		fmt.Printf("No tasks with the specified label(s).\n")
-		return nil
-	}
-
-	removed := 0
-	for _, c := range candidates {
-		freshPID, nowAlive := verifyAndGetPID(store, c.id)
-		if nowAlive {
-			if r.Force {
-				_ = process.SignalKill(freshPID)
-				killChildIfVerified(store, c.id)
-			} else {
-				gracefulStopTask(store, c.id, freshPID, 10*time.Second)
-			}
-		}
-		if err := store.Remove(c.id); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to remove %s: %v\n", c.meta.Name, err)
-			continue
-		}
-		lipgloss.Printf("Removed: %s\n", ui.Bold.Render(c.meta.Name))
-		removed++
-	}
-	if removed == 0 {
-		fmt.Printf("No tasks with the specified label(s).\n")
-	}
-	return nil
-}
-
-func (r *RmCmd) rmOne(store *state.Store, nameOrID string) error {
-	id, meta, err := store.Resolve(nameOrID)
-	if err != nil {
-		return err
-	}
-
-	// Stop if running, using the appropriate method.
-	pid, alive := verifyAndGetPID(store, id)
-	if alive {
-		if r.Force {
-			_ = process.SignalKill(pid)
-			killChildIfVerified(store, id)
+	printEmpty := func() {
+		if r.All {
+			fmt.Println("No tasks to remove.")
 		} else {
-			gracefulStopTask(store, id, pid, 10*time.Second)
+			fmt.Printf("No tasks with the specified label(s).\n")
 		}
 	}
 
-	if err := store.Remove(id); err != nil {
-		return fmt.Errorf("remove state: %w", err)
+	if bulk && len(result.Items) == 0 {
+		printEmpty()
+		return nil
 	}
 
-	lipgloss.Printf("Removed: %s\n", ui.Bold.Render(meta.Name))
+	removed := 0
+	for _, item := range result.Items {
+		if item.Err != nil {
+			// Only reachable for a bulk (labels/all) selection, where
+			// individual failures are tolerated: warn and keep going.
+			name := item.Ref
+			if item.Task != nil {
+				name = item.Task.Meta.Name
+			}
+			fmt.Fprintf(os.Stderr, "warning: failed to remove %s: %v\n", name, item.Err)
+			continue
+		}
+		lipgloss.Printf("Removed: %s\n", ui.Bold.Render(item.Task.Meta.Name))
+		removed++
+	}
+	if bulk && removed == 0 {
+		printEmpty()
+	}
 	return nil
 }
 
 // CleanupCmd removes state for all non-running tasks.
 type CleanupCmd struct{}
 
-func (c *CleanupCmd) Run(store *state.Store) error {
-	ids, err := store.ListIDs()
+func (c *CleanupCmd) Run(svc *taskservice.Service) error {
+	result, err := svc.Cleanup(context.Background(), taskservice.CleanupRequest{})
 	if err != nil {
 		return err
 	}
 
 	removed := 0
-	for _, id := range ids {
-		meta, err := store.ReadMeta(id)
-		if err != nil {
+	for _, item := range result.Items {
+		if item.Err != nil {
+			name := item.Ref
+			if item.Task != nil {
+				name = item.Task.Meta.Name
+			}
+			fmt.Fprintf(os.Stderr, "warning: failed to remove %s: %v\n", name, item.Err)
 			continue
 		}
-
-		_, alive := verifyAndGetPID(store, id)
-		if alive {
-			continue // Still running, skip.
+		if item.Result.Changed {
+			fmt.Printf("Removed: %s (%s)\n", item.Task.Meta.Name, item.TaskID)
+			removed++
 		}
-
-		if err := store.Remove(id); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to remove %s: %v\n", meta.Name, err)
-			continue
-		}
-		fmt.Printf("Removed: %s (%s)\n", meta.Name, id)
-		removed++
 	}
 
 	if removed == 0 {
@@ -1262,7 +797,7 @@ type SupervisorCmd struct {
 	ID   string `arg:"" help:"Task ID."`
 }
 
-func (s *SupervisorCmd) Run(_ *state.Store) error {
+func (s *SupervisorCmd) Run(_ *taskservice.Service) error {
 	store := &state.Store{Root: s.Root}
 	meta, err := store.ReadMeta(s.ID)
 	if err != nil {

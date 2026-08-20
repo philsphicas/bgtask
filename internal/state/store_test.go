@@ -371,18 +371,12 @@ func TestLock_StaleLockRemoval(t *testing.T) {
 	dir := t.TempDir()
 	s := &Store{Root: dir}
 
-	// Create a stale lock file with an old modification time.
+	// Create a stale lock file: a parseable lease record whose heartbeat is
+	// old and whose PID does not correspond to a live process.
 	lockPath := filepath.Join(dir, ".lock")
-	if err := os.WriteFile(lockPath, []byte{}, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Set mtime to 1 minute ago (> lockStaleDuration of 30s).
-	staleTime := time.Now().Add(-time.Minute)
-	if err := os.Chtimes(lockPath, staleTime, staleTime); err != nil {
-		t.Fatal(err)
-	}
+	writeStaleLease(t, lockPath, nonexistentPID)
 
-	// Lock should succeed by removing the stale lock.
+	// Lock should succeed by reclaiming the stale lease.
 	unlock, err := s.Lock()
 	if err != nil {
 		t.Fatalf("Lock should succeed after stale lock removal: %v", err)
@@ -495,6 +489,39 @@ func TestListIDs_IgnoresFiles(t *testing.T) {
 	}
 	if len(ids) != 1 {
 		t.Errorf("expected 1 ID (ignoring files), got %d: %v", len(ids), ids)
+	}
+}
+
+func TestListIDs_IgnoresDotDirs(t *testing.T) {
+	dir := t.TempDir()
+	s := &Store{Root: dir}
+
+	// Internal bookkeeping directories (e.g. the per-task lock directory)
+	// must never be mistaken for a task ID.
+	if err := os.MkdirAll(filepath.Join(dir, ".locks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".hidden"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	meta := &Meta{
+		ID:        GenerateID(),
+		Name:      "real-task",
+		Command:   []string{"echo"},
+		Cwd:       "/tmp",
+		CreatedAt: time.Now(),
+	}
+	if err := s.Create(meta); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := s.ListIDs()
+	if err != nil {
+		t.Fatalf("ListIDs: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != meta.ID {
+		t.Errorf("expected only %q (ignoring dot-dirs), got %v", meta.ID, ids)
 	}
 }
 

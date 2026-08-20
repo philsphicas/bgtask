@@ -7,6 +7,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/philsphicas/bgtask/internal/state"
+	"github.com/philsphicas/bgtask/internal/taskservice"
 	"github.com/willabides/kongplete"
 )
 
@@ -34,6 +35,7 @@ var CLI struct {
 	Label   LabelCmd   `cmd:"" help:"Set labels on a task."`
 	Rm      RmCmd      `cmd:"" help:"Stop and delete a task."`
 	Cleanup CleanupCmd `cmd:"" help:"Remove all non-running tasks."`
+	Serve   ServeCmd   `cmd:"" help:"Run the foreground REST/MCP server."`
 
 	Completion kongplete.InstallCompletions `cmd:"" help:"Output shell completion script."`
 
@@ -69,15 +71,16 @@ func main() {
 	ctx, err := parser.Parse(os.Args[1:])
 	parser.FatalIfErrorf(err)
 
-	// Initialize the store once for all commands (except supervisor, which
-	// creates its own from explicit args).
+	// Initialize the store and service once for all commands (except
+	// supervisor, which creates its own store from explicit args).
 	store, err := state.DefaultStore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	svc := taskservice.New(store)
 
-	if err := ctx.Run(store); err != nil {
+	if err := ctx.Run(svc); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
