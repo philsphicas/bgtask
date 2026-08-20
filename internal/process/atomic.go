@@ -36,7 +36,7 @@ func AtomicReplace(path string, data []byte, perm os.FileMode) error {
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpPath)
+			_ = os.Remove(tmpPath) //nolint:gosec // path comes from os.CreateTemp in the caller-selected directory
 		}
 	}()
 
@@ -66,7 +66,7 @@ func AtomicReplace(path string, data []byte, perm os.FileMode) error {
 func renameWithRetry(oldpath, newpath string) error {
 	var err error
 	for attempt := 1; attempt <= atomicReplaceMaxAttempts; attempt++ {
-		err = os.Rename(oldpath, newpath)
+		err = os.Rename(oldpath, newpath) //nolint:gosec // both paths are internally constructed state/control paths
 		if err == nil {
 			return nil
 		}

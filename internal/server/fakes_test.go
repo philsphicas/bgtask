@@ -105,14 +105,6 @@ func (f *fakeEnv) ListeningPorts(pid int) []uint32 {
 	return f.ports[pid]
 }
 
-// markDead marks pid as no longer alive without going through a real stop,
-// so tests can cheaply set up a "stopped" precondition.
-func (f *fakeEnv) markDead(pid int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.alive[pid] = false
-}
-
 // newTestService builds a taskservice.Service around a temp-dir store and
 // a fresh fakeEnv wired as both Launcher and ProcessController, with delays
 // tuned down so route tests run fast.

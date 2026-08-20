@@ -58,7 +58,7 @@ func TestListenServeShutdown(t *testing.T) {
 	url := "http://" + ln.Addr().String() + "/healthz"
 	var resp *http.Response
 	for i := 0; i < 50; i++ {
-		resp, err = http.Get(url)
+		resp, err = http.Get(url) //nolint:gosec // URL comes from the test listener
 		if err == nil {
 			break
 		}

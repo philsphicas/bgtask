@@ -218,7 +218,7 @@ func mustNewRESTServer(t *testing.T, svc *taskservice.Service) *server.Server {
 
 func postJSON(t *testing.T, url, body string) *http.Response {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", bytes.NewBufferString(body))
+	resp, err := http.Post(url, "application/json", bytes.NewBufferString(body)) //nolint:gosec // test URL is an httptest server
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}

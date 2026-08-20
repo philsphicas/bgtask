@@ -12,10 +12,14 @@ import (
 func (s *Service) resolve(op, ref string) (string, *state.Meta, error) {
 	id, meta, err := s.Store.Resolve(ref)
 	if err != nil {
-		if errors.Is(err, state.ErrAmbiguousName) {
+		switch {
+		case errors.Is(err, state.ErrAmbiguousName):
 			return "", nil, Conflict(op, ref, "", err.Error())
+		case errors.Is(err, state.ErrTaskNotFound):
+			return "", nil, NotFound(op, ref, err.Error())
+		default:
+			return "", nil, Internal(op, ref, "", err)
 		}
-		return "", nil, NotFound(op, ref, err.Error())
 	}
 	return id, meta, nil
 }

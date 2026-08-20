@@ -40,12 +40,6 @@ type launchOutcome struct {
 	Exit *state.Exit
 }
 
-// launched reports whether the outcome represents a supervisor that
-// actually started (as opposed to one that never signaled anything).
-func (o launchOutcome) launched() bool {
-	return o.State == launchReady || o.State == launchExited || o.State == launchDisappeared
-}
-
 // awaitLaunch waits, up to StartupReadyTimeout, for evidence that the
 // supervisor launched with the given PID actually started. Callers must
 // hold the task's lock across this wait so a concurrent Start/Run cannot

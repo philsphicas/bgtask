@@ -11,6 +11,19 @@ import (
 	"github.com/philsphicas/bgtask/internal/taskservice"
 )
 
+func TestGet_StoreFailureIsInternal(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(root, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := taskservice.New(&state.Store{Root: root})
+
+	_, err := svc.Get(context.Background(), "missing")
+	if taskservice.CodeOf(err) != taskservice.CodeInternal {
+		t.Fatalf("expected CodeInternal for store failure, got %v (code=%s)", err, taskservice.CodeOf(err))
+	}
+}
+
 func TestList_FiltersByLabelOrSemantics(t *testing.T) {
 	svc, _ := newTestService(t)
 	mustRun(t, svc, "web", []string{"sleep", "100"})

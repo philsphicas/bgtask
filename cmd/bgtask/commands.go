@@ -327,15 +327,6 @@ func hasLabel(labels []string, label string) bool {
 	return false
 }
 
-func hasAnyLabel(labels []string, filterLabels []string) bool {
-	for _, fl := range filterLabels {
-		if hasLabel(labels, fl) {
-			return true
-		}
-	}
-	return false
-}
-
 func formatPorts(ports []uint32) string {
 	if len(ports) == 0 {
 		return "-"

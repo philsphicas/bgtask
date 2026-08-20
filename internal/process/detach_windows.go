@@ -134,7 +134,7 @@ func writeCtlFile(pid int, action string) error {
 			continue
 		}
 		pidFile := filepath.Join(procsDir, e.Name(), "supervisor.pid")
-		data, err := os.ReadFile(pidFile)
+		data, err := os.ReadFile(pidFile) //nolint:gosec // path is built from the internally resolved process-state directory
 		if err != nil {
 			continue
 		}

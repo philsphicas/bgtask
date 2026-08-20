@@ -273,7 +273,7 @@ func TestLockTaskContext_UnderLocksDir(t *testing.T) {
 }
 
 func TestSafeLockName_SanitizesUnsafeCharacters(t *testing.T) {
-	cases := map[string]string{
+	cases := map[string]string{ //nolint:gosec // task IDs and paths, not credentials
 		"20240101T000000-abcd1234": "20240101T000000-abcd1234",
 		"":                         "task",
 		"../../etc/passwd":         ".._.._etc_passwd",
