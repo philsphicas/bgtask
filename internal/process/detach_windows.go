@@ -76,7 +76,9 @@ func writeCtlFile(pid int, action string) error {
 	// We can't import internal/state (would create a cycle), so we duplicate
 	// the directory resolution here.
 	var procsDir string
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+	if override := os.Getenv("BGTASK_STATE_DIR"); override != "" {
+		procsDir = filepath.Join(override, "procs")
+	} else if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		procsDir = filepath.Join(xdg, "bgtask", "procs")
 	} else {
 		appData := os.Getenv("APPDATA")

@@ -195,6 +195,8 @@ When you run `bgtask run`, the CLI:
 
 State directory locations:
 
+`BGTASK_STATE_DIR` can be set to a full bgtask state directory path and takes precedence over platform defaults.
+
 | Platform | Path                                    |
 | -------- | --------------------------------------- |
 | Linux    | `~/.config/bgtask/`                     |
