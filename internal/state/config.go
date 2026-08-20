@@ -6,8 +6,15 @@ import (
 	"runtime"
 )
 
+const stateDirOverrideEnv = "BGTASK_STATE_DIR"
+
 // configDir returns the platform-appropriate config directory for bgtask.
 func configDir() (string, error) {
+	// Explicit per-invocation override takes highest priority.
+	if override := os.Getenv(stateDirOverrideEnv); override != "" {
+		return override, nil
+	}
+
 	switch runtime.GOOS {
 	case "windows":
 		// Check XDG_CONFIG_HOME first (used by tests and power users).

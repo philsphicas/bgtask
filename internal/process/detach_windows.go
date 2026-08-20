@@ -14,6 +14,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const stateDirOverrideEnv = "BGTASK_STATE_DIR"
+
 // Detach starts a detached child process that survives the parent's exit.
 // The returned bool indicates whether breakaway from the parent job failed;
 // when true the supervisor may not survive SSH session exit.
@@ -76,7 +78,9 @@ func writeCtlFile(pid int, action string) error {
 	// We can't import internal/state (would create a cycle), so we duplicate
 	// the directory resolution here.
 	var procsDir string
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+	if override := os.Getenv(stateDirOverrideEnv); override != "" {
+		procsDir = filepath.Join(override, "procs")
+	} else if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		procsDir = filepath.Join(xdg, "bgtask", "procs")
 	} else {
 		appData := os.Getenv("APPDATA")
