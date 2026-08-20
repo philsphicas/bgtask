@@ -12,9 +12,9 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
 
@@ -24,7 +24,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          current="$(go list -m -f '{{.GoVersion}}')"
+          current="$(go mod edit -json | jq -r '.Toolchain // ("go" + .Go)')"
+          current="${current#go}"
           latest="$(go env GOVERSION)"
           latest="${latest#go}"
 
@@ -34,8 +35,8 @@ jobs:
             exit 0
           fi
 
-          IFS=. read -r current_major current_minor current_patch <<< "$current"
-          IFS=. read -r latest_major latest_minor latest_patch <<< "$latest"
+          IFS=. read -r current_major current_minor _ <<< "$current"
+          IFS=. read -r latest_major latest_minor _ <<< "$latest"
           if [ "$current_major" = "$latest_major" ] &&
              [ "$current_minor" = "$latest_minor" ]; then
             echo "is-patch=true" >> "$GITHUB_OUTPUT"
@@ -45,6 +46,7 @@ jobs:
 
           echo "current=$current" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "language=$latest_major.$latest_minor.0" >> "$GITHUB_OUTPUT"
           echo "update-available=true" >> "$GITHUB_OUTPUT"
 
       - name: Require PR token
@@ -60,8 +62,10 @@ jobs:
       - name: Update module metadata
         if: steps.version.outputs.update-available == 'true'
         run: |
-          go mod edit -go="${{ steps.version.outputs.latest }}"
-          go mod tidy
+          go mod edit \
+            -go="${{ steps.version.outputs.language }}" \
+            -toolchain="go${{ steps.version.outputs.latest }}"
+          go mod tidy -go="${{ steps.version.outputs.language }}"
 
       - name: Create pull request
         id: pull-request
@@ -74,7 +78,8 @@ jobs:
           commit-message: "build: update Go toolchain to ${{ steps.version.outputs.latest }}"
           title: "build: update Go toolchain to ${{ steps.version.outputs.latest }}"
           body: |
-            Updates the `go` directive to Go ${{ steps.version.outputs.latest }} and runs `go mod tidy`.
+            Updates the `go` language baseline to Go ${{ steps.version.outputs.language }},
+            prefers toolchain Go ${{ steps.version.outputs.latest }}, and runs `go mod tidy`.
 
             Patch-level Go updates are eligible for auto-merge after required checks pass. Feature releases require review.
           add-paths: |
