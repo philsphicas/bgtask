@@ -53,7 +53,7 @@ func newHealthCheckCommand(ctx context.Context, command string) *exec.Cmd {
 		if shell == "" {
 			shell = "cmd.exe"
 		}
-		cmd = exec.CommandContext(ctx, shell, "/c", command)
+		cmd = exec.CommandContext(ctx, shell, "/c", command) //nolint:gosec // COMSPEC and health command come from the task owner's environment/configuration
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", command)
 	}
