@@ -49,7 +49,11 @@ type Config struct {
 func newHealthCheckCommand(ctx context.Context, command string) *exec.Cmd {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd", "/c", command)
+		shell := os.Getenv("COMSPEC")
+		if shell == "" {
+			shell = "cmd.exe"
+		}
+		cmd = exec.CommandContext(ctx, shell, "/c", command)
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", command)
 	}
