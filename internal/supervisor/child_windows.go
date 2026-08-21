@@ -2,7 +2,11 @@
 
 package supervisor
 
-import "syscall"
+import (
+	"syscall"
+
+	"golang.org/x/sys/windows"
+)
 
 // childSysProcAttr returns SysProcAttr for child processes on Windows.
 // CREATE_NO_WINDOW prevents Windows from allocating a console (conhost.exe)
@@ -10,6 +14,6 @@ import "syscall"
 // supervisor's stream capture goroutines never see EOF.
 func childSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{
-		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		CreationFlags: windows.CREATE_NO_WINDOW,
 	}
 }
