@@ -64,13 +64,43 @@ func newDetachedCmd(exe string, args []string, flags uint32) *exec.Cmd {
 }
 
 // SignalRestart writes a restart command to the control file.
+//
+// Deprecated: this scans every task directory under the default procs
+// directory looking for one whose supervisor.pid matches pid, which is
+// wasteful when the caller already knows the task directory. Prefer
+// SignalRestartDir.
 func SignalRestart(pid int) error {
 	return writeCtlFile(pid, "restart")
 }
 
 // SignalStop writes a stop command to the control file.
+//
+// Deprecated: see SignalRestart; prefer SignalStopDir.
 func SignalStop(pid int) error {
 	return writeCtlFile(pid, "stop")
+}
+
+// SignalRestartDir writes a restart command directly to taskDir/ctl. Unlike
+// SignalRestart, this does not need to resolve the default config directory
+// or scan every task's supervisor.pid to find a match. pid is accepted for
+// API symmetry with SignalRestart and other platforms but is unused here:
+// the control file is targeted by directory, not by PID.
+func SignalRestartDir(taskDir string, _ int) error {
+	return writeCtlFileDir(taskDir, "restart")
+}
+
+// SignalStopDir writes a stop command directly to taskDir/ctl. Unlike
+// SignalStop, this does not need to resolve the default config directory or
+// scan every task's supervisor.pid to find a match. pid is accepted for API
+// symmetry; see SignalRestartDir.
+func SignalStopDir(taskDir string, _ int) error {
+	return writeCtlFileDir(taskDir, "stop")
+}
+
+// writeCtlFileDir writes action to taskDir/ctl using an atomic replace so a
+// concurrent reader never observes a partial or missing file.
+func writeCtlFileDir(taskDir, action string) error {
+	return AtomicReplace(filepath.Join(taskDir, "ctl"), []byte(action), 0o600)
 }
 
 func writeCtlFile(pid int, action string) error {
@@ -104,19 +134,12 @@ func writeCtlFile(pid int, action string) error {
 			continue
 		}
 		pidFile := filepath.Join(procsDir, e.Name(), "supervisor.pid")
-		data, err := os.ReadFile(pidFile)
+		data, err := os.ReadFile(pidFile) //nolint:gosec // path is built from the internally resolved process-state directory
 		if err != nil {
 			continue
 		}
 		if strings.TrimSpace(string(data)) == fmt.Sprintf("%d", pid) {
-			ctlFile := filepath.Join(procsDir, e.Name(), "ctl")
-			tmpFile := ctlFile + ".tmp"
-			if err := os.WriteFile(tmpFile, []byte(action), 0o600); err != nil {
-				return err
-			}
-			// On Windows, os.Rename fails if destination exists.
-			_ = os.Remove(ctlFile)
-			return os.Rename(tmpFile, ctlFile)
+			return writeCtlFileDir(filepath.Join(procsDir, e.Name()), action)
 		}
 	}
 	return fmt.Errorf("no task found with supervisor PID %d", pid)

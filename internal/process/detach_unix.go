@@ -49,3 +49,17 @@ func SignalRestart(pid int) error {
 func SignalStop(pid int) error {
 	return SignalTerm(pid)
 }
+
+// SignalRestartDir sends SIGHUP to pid, restarting it. The task directory
+// is ignored on Unix, where signals target the pid directly; it exists only
+// so callers can share one call site across platforms (Windows writes
+// taskDir/ctl instead of signaling).
+func SignalRestartDir(_ string, pid int) error {
+	return SignalRestart(pid)
+}
+
+// SignalStopDir sends SIGTERM to pid, stopping it. The task directory is
+// ignored on Unix; see SignalRestartDir.
+func SignalStopDir(_ string, pid int) error {
+	return SignalStop(pid)
+}

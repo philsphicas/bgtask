@@ -1,0 +1,160 @@
+// Package mcpserver implements bgtask's MCP (Model Context Protocol)
+// surface: a stateless Streamable HTTP handler exposing bgtask's task
+// lifecycle as a fixed set of bgtask_* tools, backed by the same
+// taskservice.Service used by the CLI and the REST API (internal/server).
+//
+// Every tool's typed Input struct is the tool's JSON input schema (via
+// struct reflection and "jsonschema" tag descriptions), and every
+// successful call auto-populates structured output content from the
+// typed Output struct. Domain failures (task not found, name conflict,
+// busy lock, etc.) are reported as CallToolResult.IsError results whose
+// Output carries a structured ToolError -- never as bare, unstructured
+// prose -- so a calling model can inspect the machine-readable
+// code/message/ref/task_id/retryable fields and self-correct.
+package mcpserver
+
+import (
+	"net/http"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/philsphicas/bgtask/internal/taskservice"
+)
+
+// handlers holds the taskservice dependency shared by every MCP tool
+// handler, mirroring internal/server's unexported api type for the REST
+// adapter.
+type handlers struct {
+	svc *taskservice.Service
+}
+
+// boolPtr returns a pointer to b, for the optional *bool fields of
+// mcp.ToolAnnotations.
+func boolPtr(b bool) *bool { return &b }
+
+// NewHandler builds bgtask's MCP Streamable HTTP handler: a stateless,
+// JSON-response server exposing exactly the bgtask_* tool surface over
+// svc. version is reported to MCP clients as the server implementation's
+// version (bgtask's own build version).
+//
+// The handler is stateless (StreamableHTTPOptions.Stateless), matching
+// bgtask's REST API: every call is a self-contained POST with no
+// server-retained session state, and no server-initiated requests or
+// notifications are used. JSONResponse is set because, with no
+// server-initiated interactions, a plain JSON response per call is
+// simpler than negotiating an SSE stream for a single reply.
+// PropagateRequestCancellation ties a tool call's context to the
+// underlying HTTP request, so an aborted request doesn't leave taskservice
+// work running past its caller. The SDK's own localhost Host-header (DNS
+// rebinding) protection remains enabled; bgtask's Origin allow-list is
+// applied by internal/server's middleware around every route, including
+// this one.
+func NewHandler(svc *taskservice.Service, version string) http.Handler {
+	srv := newServer(svc, version)
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return srv
+	}, &mcp.StreamableHTTPOptions{
+		Stateless:                    true,
+		JSONResponse:                 true,
+		PropagateRequestCancellation: true,
+		MaxRequestBodyBytes:          mcp.DefaultMaxRequestBodyBytes,
+	})
+}
+
+// newServer builds the mcp.Server with every bgtask_* tool registered. It
+// is split out from NewHandler so tests can drive the *mcp.Server
+// directly (e.g. over an in-memory transport) without an HTTP round trip.
+func newServer(svc *taskservice.Service, version string) *mcp.Server {
+	s := mcp.NewServer(&mcp.Implementation{
+		Name:    "bgtask",
+		Version: version,
+	}, nil)
+	h := &handlers{svc: svc}
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "bgtask_list",
+		Description: "List bgtask-managed background tasks, each with its command, working directory, " +
+			"labels, restart/health-check configuration, and freshly resolved runtime status " +
+			"(running/exited/dead/unknown). Optionally filter by label (OR match). Read-only.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
+	}, h.list)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "bgtask_get",
+		Description: "Get a single bgtask-managed task by name or ID, with its full configuration and freshly resolved runtime status. Read-only.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
+	}, h.get)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "bgtask_run",
+		Description: "Launch a new background task under bgtask's supervision: a detached, restartable process whose output is " +
+			"captured to a log file and whose lifecycle (running/exited/dead) can be queried later. Fails with a conflict error " +
+			"if a task with the same name already exists, unless replace_existing is set (destructive: stops and permanently " +
+			"replaces the existing task).",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), IdempotentHint: false},
+	}, h.run)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "bgtask_logs",
+		Description: "Read a bounded snapshot of a task's captured stdout/stderr/lifecycle log entries. Always bounded (default " +
+			"200 entries, maximum 5000) and never follows/streams -- call again for newer entries. By default only entries from " +
+			"the task's current run are returned; set all to include entries from previous runs too.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
+	}, h.logs)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "bgtask_start",
+		Description: "(Re-)launch one or more stopped tasks, selected by explicit refs (fail-fast, in order), by labels (OR " +
+			"match, best-effort), or all (every task, best-effort). Exactly one selection mode must be set. A task that is " +
+			"already running fails with a failed_precondition error for that item.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(false)},
+	}, h.start)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "bgtask_stop",
+		Description: "Stop one or more running tasks, selected by explicit refs (fail-fast, in order), by labels (OR match, " +
+			"best-effort), or all (every task, best-effort). Exactly one selection mode must be set. Destructive: signals " +
+			"graceful shutdown (or, with force, immediately SIGKILLs the process). A task that is already stopped is reported " +
+			"as a no-op, not an error.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), IdempotentHint: true},
+	}, h.stop)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "bgtask_restart",
+		Description: "Restart one or more running tasks in place, selected by explicit refs (fail-fast, in order), by labels " +
+			"(OR match, best-effort), or all (every task, best-effort). Exactly one selection mode must be set. Destructive: " +
+			"signals a restart (or, with force, kills the child before restarting). A task that is not running fails with a " +
+			"failed_precondition error for that item.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), IdempotentHint: false},
+	}, h.restart)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "bgtask_remove",
+		Description: "Stop (if running) and permanently delete one or more tasks' on-disk state and logs, selected by explicit " +
+			"refs (fail-fast, in order), by labels (OR match, best-effort), or all (every task, best-effort). Exactly one " +
+			"selection mode must be set. Destructive and irreversible: once removed, a task's history and logs are gone.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), IdempotentHint: false},
+	}, h.remove)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "bgtask_cleanup",
+		Description: "Permanently delete on-disk state for every non-running (exited, dead, or unknown) task. Running tasks are " +
+			"left alone and reported as a no-op. Destructive and irreversible, but safe to call repeatedly (a second call simply " +
+			"finds nothing left to remove). Takes no parameters.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), IdempotentHint: true},
+	}, h.cleanup)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "bgtask_rename",
+		Description: "Rename a task. The new name must be unique among all tasks; the task keeps its ID and all other configuration.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(false), IdempotentHint: true},
+	}, h.rename)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "bgtask_set_labels",
+		Description: "Destructive: wholesale-replace a task's labels with exactly the given set. This is not additive -- any " +
+			"label not included is removed. Pass an empty (or omitted) labels list to clear all labels.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), IdempotentHint: true},
+	}, h.setLabels)
+
+	return s
+}

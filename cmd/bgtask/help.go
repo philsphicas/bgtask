@@ -33,6 +33,7 @@ Usage:
   bgtask label <name> [LABEL...]
   bgtask rm <name...> [--force] | rm --labels LABEL,... | rm --all
   bgtask cleanup
+  bgtask serve [--bind ADDR] [--port PORT] [--expose mcp,rest] [--allow-origin ORIGIN,...]
 
 Global Options:
   --version    Print version and exit
@@ -147,6 +148,18 @@ Rm:
 
 Cleanup:
   Remove state for all non-running tasks. Running tasks are left alone.
+
+Serve:
+  Run bgtask as a foreground server exposing a REST API and/or MCP
+  Streamable HTTP endpoint instead of one process per invocation.
+
+        --bind ADDR             Address to bind (default: 127.0.0.1)
+        --port PORT             Port to listen on, 0 picks a free port (default: 8420)
+        --expose mcp,rest       Interface(s) to expose (repeatable, default: both)
+        --allow-origin ORIGIN   Allowed browser Origin header value (repeatable)
+
+  Prints one JSON line to stdout once listening (useful with --port 0):
+    {"event":"listening","addr":"127.0.0.1:8420","pid":1234}
 
 Label:
   Set or replace labels on an existing task. Pass one or more labels as

@@ -81,6 +81,7 @@ See the [full interactive demo](docs/demo.md) for more.
 | `bgtask rename OLD NEW`       | Rename a task                                    |
 | `bgtask rm NAME`              | Stop and delete a task                           |
 | `bgtask cleanup`              | Remove all non-running task state                |
+| `bgtask serve`                | Serve the REST API and MCP endpoint              |
 | `bgtask completion`           | Output shell completion script                   |
 
 ## Features
@@ -192,6 +193,115 @@ bgtask completion             # install completions for your current shell
 bgtask completion --uninstall # remove them
 ```
 
+### REST API and MCP server
+
+`bgtask serve` runs a foreground HTTP server backed by the same state directory
+as the CLI:
+
+```sh
+bgtask serve
+# {"event":"listening","addr":"127.0.0.1:8420","pid":12345}
+```
+
+REST and MCP are enabled by default. Either surface can be exposed alone:
+
+```sh
+bgtask serve --expose rest
+bgtask serve --expose mcp
+bgtask serve --expose rest --expose mcp
+```
+
+The REST API is mounted at `http://127.0.0.1:8420/api/v1`; MCP clients connect
+to the Streamable HTTP endpoint at `http://127.0.0.1:8420/mcp`. A health check
+is always available at `/healthz`.
+
+To supervise the server with bgtask itself:
+
+```sh
+bgtask run --name bgtask-api \
+  --restart on-failure \
+  --health "curl -fsS http://127.0.0.1:8420/healthz" \
+  -- bgtask serve
+```
+
+Multiple server and CLI processes can safely use the same state directory.
+They do not cache an authoritative task view; each operation reads current
+state and cross-process locks coordinate mutations.
+
+#### REST examples
+
+```sh
+# List tasks
+curl -s http://127.0.0.1:8420/api/v1/tasks
+
+# Launch a task (duplicate names return 409 unless replace_existing is true)
+curl -sS -X POST http://127.0.0.1:8420/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"name":"api","command":["python3","server.py","8080"]}'
+
+# Inspect, stop, and remove it
+curl -s http://127.0.0.1:8420/api/v1/tasks/api
+curl -sS -X POST http://127.0.0.1:8420/api/v1/tasks/api/stop \
+  -H "Content-Type: application/json" -d '{}'
+curl -sS -X DELETE http://127.0.0.1:8420/api/v1/tasks/api
+
+# Read the last 100 structured log entries
+curl -s "http://127.0.0.1:8420/api/v1/tasks/api/logs?tail=100&all=true"
+```
+
+REST routes:
+
+| Method          | Route                                                 | Operation                    |
+| --------------- | ----------------------------------------------------- | ---------------------------- |
+| `GET`, `POST`   | `/api/v1/tasks`                                       | List or launch tasks         |
+| `GET`, `DELETE` | `/api/v1/tasks/{name-or-id}`                          | Inspect or remove a task     |
+| `GET`           | `/api/v1/tasks/{name-or-id}/logs`                     | Read bounded structured logs |
+| `POST`          | `/api/v1/tasks/{name-or-id}/{start,stop,restart}`     | Control lifecycle            |
+| `POST`          | `/api/v1/tasks/{name-or-id}/rename`                   | Rename a task                |
+| `PUT`           | `/api/v1/tasks/{name-or-id}/labels`                   | Replace labels               |
+| `POST`          | `/api/v1/actions/{start,stop,restart,remove,cleanup}` | Bulk action                  |
+
+Task responses include environment variable names but redact their values.
+Commands, working directories, and logs are returned as stored.
+
+#### MCP tools
+
+The MCP endpoint exposes:
+
+`bgtask_list`, `bgtask_get`, `bgtask_run`, `bgtask_logs`, `bgtask_start`,
+`bgtask_stop`, `bgtask_restart`, `bgtask_rename`, `bgtask_set_labels`,
+`bgtask_remove`, and `bgtask_cleanup`.
+
+![REST and MCP server demo](https://github.com/philsphicas/bgtask/releases/download/assets/server-demo.gif)
+
+Configure any MCP client that supports Streamable HTTP with:
+
+```json
+{
+  "mcpServers": {
+    "bgtask": {
+      "type": "http",
+      "url": "http://127.0.0.1:8420/mcp"
+    }
+  }
+}
+```
+
+MCP and REST log reads are bounded snapshots (default 200, maximum 5000);
+poll again for newer entries. The CLI remains the interface for following logs
+continuously with `bgtask logs -f`.
+
+See [Using bgtask from an agent](docs/agent-usage.md) for Windows-to-WSL setup,
+MCP configuration, tool descriptions, example agent prompts, and REST
+verification commands.
+
+> [!WARNING]
+> The server does not implement authentication or TLS. Binding to a
+> non-loopback address (for example, `--bind 0.0.0.0`) grants anyone who can
+> reach the port the ability to execute commands and read task output. Protect
+> remote access with firewall rules, an SSH tunnel, or an authenticated reverse
+> proxy.
+
 ## How it works
 
 When you run `bgtask run`, the CLI:
@@ -200,6 +310,10 @@ When you run `bgtask run`, the CLI:
 2. Re-executes itself as a detached **supervisor** process (`bgtask supervisor`)
 3. The supervisor starts the child command, captures stdout/stderr to a **JSONL log**, and manages lifecycle (restart, health checks)
 4. PID files and process creation timestamps are stored for **PID reuse protection** -- bgtask verifies a process is actually yours before signaling it
+
+CLI and server mutations use owned filesystem leases. This allows multiple CLI
+and server processes to share one state directory without maintaining separate
+in-memory task databases.
 
 State directory locations:
 
@@ -217,6 +331,10 @@ State directory locations:
   If the child forks subprocesses, those may not be terminated. For shell
   scripts that spawn background processes, consider using `exec` to replace
   the shell process.
+- **Server security**: `bgtask serve` currently has no authentication or TLS.
+- **Self-management**: If a supervised server stops, restarts, or removes
+  itself through its own API, the request may disconnect before receiving the
+  final response.
 
 ## License
 

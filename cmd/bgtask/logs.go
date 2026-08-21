@@ -10,66 +10,21 @@ import (
 
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/philsphicas/bgtask/internal/supervisor"
+	"github.com/philsphicas/bgtask/internal/taskservice"
 	"github.com/philsphicas/bgtask/internal/ui"
 )
 
-func showLogs(logFiles []string, exitJSONPath string, follow bool, tail int, since time.Duration, sinceTime time.Time, stdoutOnly, stderrOnly, timestamps bool) error {
-	if len(logFiles) == 0 {
+// showLogs prints the entries already resolved by taskservice.Service.Logs
+// (respecting tail/since/all/stream filters), then optionally follows the
+// task's current log file for new lines. The follow loop is CLI-only: it
+// polls the file directly and is not part of the service's bounded read.
+func showLogs(result *taskservice.LogsResult, follow, stdoutOnly, stderrOnly, timestamps bool) error {
+	if !result.HasAnyLogFile {
 		fmt.Println("No logs yet.")
 		return nil
 	}
 
-	// Read entries from all log files (oldest first = reverse of logFiles,
-	// which are returned newest-first by ListLogFiles).
-	var entries []supervisor.LogEntry
-	for i := len(logFiles) - 1; i >= 0; i-- {
-		fileEntries, err := readLogFile(logFiles[i])
-		if err != nil {
-			return err
-		}
-		entries = append(entries, fileEntries...)
-	}
-
-	// Filter to current run (sinceTime from child.starttime).
-	if !sinceTime.IsZero() {
-		var filtered []supervisor.LogEntry
-		for _, e := range entries {
-			if !e.Time.Before(sinceTime) {
-				filtered = append(filtered, e)
-			}
-		}
-		entries = filtered
-	}
-
-	// Apply --since filter (relative duration).
-	if since > 0 {
-		cutoff := time.Now().Add(-since)
-		var filtered []supervisor.LogEntry
-		for _, e := range entries {
-			if !e.Time.Before(cutoff) {
-				filtered = append(filtered, e)
-			}
-		}
-		entries = filtered
-	}
-
-	// Apply tail.
-	if tail >= 0 {
-		if tail == 0 {
-			entries = nil
-		} else if len(entries) > tail {
-			entries = entries[len(entries)-tail:]
-		}
-	}
-
-	// Print entries.
-	for _, e := range entries {
-		if stdoutOnly && e.Stream != "o" {
-			continue
-		}
-		if stderrOnly && e.Stream != "e" {
-			continue
-		}
+	for _, e := range result.Entries {
 		printLogEntry(e, timestamps)
 	}
 
@@ -78,7 +33,7 @@ func showLogs(logFiles []string, exitJSONPath string, follow bool, tail int, sin
 	}
 
 	// Follow mode: poll the current (newest) log file for new lines.
-	f, err := os.Open(logFiles[0]) //nolint:gosec // path from store.OutputPath
+	f, err := os.Open(result.OutputPath) //nolint:gosec // path from taskservice.LogsResult
 	if err != nil {
 		return err
 	}
@@ -97,8 +52,8 @@ func showLogs(logFiles []string, exitJSONPath string, follow bool, tail int, sin
 			if err == io.EOF {
 				eofCount++
 				// Every ~1s (5 * 200ms), check if the task has exited.
-				if eofCount%5 == 0 && exitJSONPath != "" {
-					if _, statErr := os.Stat(exitJSONPath); statErr == nil {
+				if eofCount%5 == 0 && result.ExitPath != "" {
+					if _, statErr := os.Stat(result.ExitPath); statErr == nil {
 						return nil
 					}
 				}
@@ -160,31 +115,4 @@ func printLogEntry(e supervisor.LogEntry, timestamps bool) {
 		}
 		lipgloss.Println(ui.Dim.Render(detail))
 	}
-}
-
-// readLogFile reads all JSONL entries from a single log file.
-func readLogFile(path string) ([]supervisor.LogEntry, error) {
-	f, err := os.Open(path) //nolint:gosec // path is constructed from store
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	var entries []supervisor.LogEntry
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 1024*1024)
-	for scanner.Scan() {
-		var e supervisor.LogEntry
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
-			continue
-		}
-		entries = append(entries, e)
-	}
-	if err := scanner.Err(); err != nil {
-		return entries, fmt.Errorf("read log %s: %w", path, err)
-	}
-	return entries, nil
 }

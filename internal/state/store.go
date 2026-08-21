@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/philsphicas/bgtask/internal/process"
 )
 
 // Meta describes a managed background task.
@@ -73,45 +75,6 @@ type DeadInfo struct {
 // Store provides access to the bgtask state directory.
 type Store struct {
 	Root string // e.g. ~/.config/bgtask/procs
-}
-
-const (
-	lockRetries  = 50
-	lockInterval = 100 * time.Millisecond
-)
-
-// lockStaleDuration is the maximum age of a lock file before it is
-// considered stale. Lock is only held for very brief operations (name
-// uniqueness checks, renames), so anything older is from a crashed process.
-const lockStaleDuration = 30 * time.Second
-
-// Lock acquires an advisory lock on the store directory.
-// Returns a function to release the lock. Used for operations that require
-// atomicity (name uniqueness checks, renames).
-//
-// Stale locks (older than 30 seconds) are automatically removed.
-func (s *Store) Lock() (unlock func(), err error) {
-	lockPath := filepath.Join(s.Root, ".lock")
-	var f *os.File
-	for i := 0; i < lockRetries; i++ {
-		f, err = os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // path is constructed internally
-		if err == nil {
-			_ = f.Close()
-			break
-		}
-		// Check for stale lock by age.
-		if info, statErr := os.Stat(lockPath); statErr == nil {
-			if time.Since(info.ModTime()) > lockStaleDuration {
-				_ = os.Remove(lockPath)
-				continue // Retry immediately after removing stale lock.
-			}
-		}
-		time.Sleep(lockInterval)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("acquire lock: %w", err)
-	}
-	return func() { _ = os.Remove(lockPath) }, nil
 }
 
 // DefaultStore returns a Store using the platform-appropriate config directory.
@@ -293,6 +256,9 @@ func (s *Store) OutputPath(id string) string {
 }
 
 // ListIDs returns all task IDs (directory names under procs/).
+//
+// Dot-prefixed directories (e.g. ".locks", ".lock" if it were ever a dir)
+// are internal bookkeeping, not tasks, and are always excluded.
 func (s *Store) ListIDs() ([]string, error) {
 	entries, err := os.ReadDir(s.Root)
 	if err != nil {
@@ -300,12 +266,26 @@ func (s *Store) ListIDs() ([]string, error) {
 	}
 	var ids []string
 	for _, e := range entries {
-		if e.IsDir() {
-			ids = append(ids, e.Name())
+		if !e.IsDir() {
+			continue
 		}
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		ids = append(ids, e.Name())
 	}
 	return ids, nil
 }
+
+// ErrTaskNotFound is wrapped by Resolve when no task matches the given
+// name or ID. Callers can use errors.Is(err, state.ErrTaskNotFound) instead
+// of matching on message text.
+var ErrTaskNotFound = errors.New("task not found")
+
+// ErrAmbiguousName is wrapped by Resolve when a name matches more than one
+// task. Callers can use errors.Is(err, state.ErrAmbiguousName) instead of
+// matching on message text.
+var ErrAmbiguousName = errors.New("ambiguous")
 
 // Resolve finds a task ID by name or ID. Returns the ID and meta.
 func (s *Store) Resolve(nameOrID string) (string, *Meta, error) {
@@ -336,11 +316,11 @@ func (s *Store) Resolve(nameOrID string) (string, *Meta, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return "", nil, fmt.Errorf("task not found: %s", nameOrID)
+		return "", nil, fmt.Errorf("%w: %s", ErrTaskNotFound, nameOrID)
 	case 1:
 		return matches[0], matchMeta, nil
 	default:
-		return "", nil, fmt.Errorf("ambiguous name %q matches %d tasks; use the task ID instead", nameOrID, len(matches))
+		return "", nil, fmt.Errorf("%w name %q matches %d tasks; use the task ID instead", ErrAmbiguousName, nameOrID, len(matches))
 	}
 }
 
@@ -382,17 +362,13 @@ func (s *Store) IsNameTaken(name string) (bool, error) {
 	return false, nil
 }
 
-// atomicWrite writes data to a file atomically: write to .tmp, then rename.
-// On Windows, os.Rename fails if the destination exists, so remove it first.
+// atomicWrite writes data to path atomically: the destination is never
+// removed before the replacement is in place, so a reader can never observe
+// a missing or partially-written file. See process.AtomicReplace for the
+// cross-platform implementation, including Windows' bounded retry for
+// transient sharing/access-denied errors.
 func atomicWrite(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	if runtime.GOOS == "windows" {
-		_ = os.Remove(path)
-	}
-	return os.Rename(tmp, path)
+	return process.AtomicReplace(path, data, 0o600)
 }
 
 // ClearExit removes exit.json so a stopped task can be re-started.

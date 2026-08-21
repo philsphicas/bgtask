@@ -512,7 +512,8 @@ func TestE2E_RestartByLabel(t *testing.T) {
 func TestE2E_StartStoppedTask(t *testing.T) {
 	t.Parallel()
 	// Run a task that exits quickly.
-	run(t, "run", "--name", "e2e-start", "--", "echo", "first-run")
+	args := append([]string{"run", "--name", "e2e-start", "--"}, shellArgs("echo first-run")...)
+	run(t, args...)
 	waitForExit(t, "e2e-start")
 
 	// Re-start it.
@@ -530,8 +531,10 @@ func TestE2E_StartStoppedTask(t *testing.T) {
 
 func TestE2E_StartByLabel(t *testing.T) {
 	t.Parallel()
-	run(t, "run", "--name", "e2e-starttag1", "--labels", "startgrp", "--", "echo", "run1")
-	run(t, "run", "--name", "e2e-starttag2", "--labels", "startgrp", "--", "echo", "run2")
+	args1 := append([]string{"run", "--name", "e2e-starttag1", "--labels", "startgrp", "--"}, shellArgs("echo run1")...)
+	args2 := append([]string{"run", "--name", "e2e-starttag2", "--labels", "startgrp", "--"}, shellArgs("echo run2")...)
+	run(t, args1...)
+	run(t, args2...)
 	waitForExit(t, "e2e-starttag1")
 	waitForExit(t, "e2e-starttag2")
 

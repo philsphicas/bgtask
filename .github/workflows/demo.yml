@@ -3,7 +3,15 @@ name: Demo GIF
 on:
   push:
     branches: [main]
-    paths: [docs/demo.tape]
+    paths:
+      - docs/demo.tape
+      - docs/server-demo.tape
+  pull_request:
+    paths:
+      - docs/demo.tape
+      - docs/server-demo.tape
+      - .github/workflows/demo.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -30,13 +38,24 @@ jobs:
           sudo apt-get install -y ffmpeg ttyd vhs python3 curl jq
 
       - name: Generate demo GIF
-        run: vhs docs/demo.tape
+        run: |
+          vhs docs/demo.tape
+          vhs docs/server-demo.tape
+
+      - name: Upload demo artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-gifs
+          path: |
+            docs/demo.gif
+            docs/server-demo.gif
 
       - name: Upload to assets release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Create the assets release if it doesn't exist yet.
           gh release view assets >/dev/null 2>&1 || \
             gh release create assets --title "Assets" --notes "Auto-generated demo assets." --latest=false
-          gh release upload assets docs/demo.gif --clobber
+          gh release upload assets docs/demo.gif docs/server-demo.gif --clobber
