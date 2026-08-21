@@ -43,7 +43,7 @@ jobs:
           vhs docs/server-demo.tape
 
       - name: Upload demo artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: demo-gifs
           path: |
