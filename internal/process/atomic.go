@@ -2,6 +2,7 @@ package process
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -40,7 +41,7 @@ func AtomicReplace(path string, data []byte, perm os.FileMode) error {
 		}
 	}()
 
-	if _, err := tmp.Write(data); err != nil {
+	if err := writeFull(tmp, data); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write temp file: %w", err)
 	}
@@ -57,6 +58,17 @@ func AtomicReplace(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	cleanup = false // renamed away; nothing left to remove
+	return nil
+}
+
+func writeFull(w io.Writer, data []byte) error {
+	n, err := w.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return io.ErrShortWrite
+	}
 	return nil
 }
 

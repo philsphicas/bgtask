@@ -2,6 +2,8 @@ package process
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -9,6 +11,22 @@ import (
 	"testing"
 	"time"
 )
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+func TestWriteFullRejectsShortWrite(t *testing.T) {
+	err := writeFull(shortWriter{}, []byte("content"))
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("writeFull error = %v, want io.ErrShortWrite", err)
+	}
+}
 
 func TestAtomicReplace_CreatesNewFile(t *testing.T) {
 	dir := t.TempDir()
