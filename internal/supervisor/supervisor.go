@@ -47,16 +47,17 @@ type Config struct {
 }
 
 func newHealthCheckCommand(ctx context.Context, command string) *exec.Cmd {
-	var cmd *exec.Cmd
+	shell := "sh"
+	args := []string{"-c", command}
 	if runtime.GOOS == "windows" {
-		shell := os.Getenv("COMSPEC")
+		shell = os.Getenv("COMSPEC")
 		if shell == "" {
 			shell = "cmd.exe"
 		}
-		cmd = exec.CommandContext(ctx, shell, "/c", command) //nolint:gosec // COMSPEC comes from the task owner's environment
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", command)
+		args[0] = "/c"
 	}
+
+	cmd := exec.CommandContext(ctx, shell, args...) //nolint:gosec // shell command is explicitly configured by the task owner
 	cmd.SysProcAttr = childSysProcAttr()
 	return cmd
 }
