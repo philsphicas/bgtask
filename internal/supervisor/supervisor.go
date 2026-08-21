@@ -46,6 +46,22 @@ type Config struct {
 	HealthInterval time.Duration
 }
 
+func newHealthCheckCommand(ctx context.Context, command string) *exec.Cmd {
+	shell := "sh"
+	args := []string{"-c", command}
+	if runtime.GOOS == "windows" {
+		shell = os.Getenv("COMSPEC")
+		if shell == "" {
+			shell = "cmd.exe"
+		}
+		args[0] = "/c"
+	}
+
+	cmd := exec.CommandContext(ctx, shell, args...) //nolint:gosec // shell command is explicitly configured by the task owner
+	cmd.SysProcAttr = childSysProcAttr()
+	return cmd
+}
+
 // Run is the main supervisor loop. It is called by the hidden supervisor
 // subcommand after re-exec.
 func Run(cfg *Config) error {
@@ -208,12 +224,7 @@ func Run(cfg *Config) error {
 					timeout = 30 * time.Second
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), timeout)
-				var healthCmd *exec.Cmd
-				if runtime.GOOS == "windows" {
-					healthCmd = exec.CommandContext(ctx, "cmd", "/c", cfg.HealthCheck)
-				} else {
-					healthCmd = exec.CommandContext(ctx, "sh", "-c", cfg.HealthCheck)
-				}
+				healthCmd := newHealthCheckCommand(ctx, cfg.HealthCheck)
 				out, err := healthCmd.CombinedOutput()
 				cancel()
 				if err != nil {
