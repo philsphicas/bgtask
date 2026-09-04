@@ -126,8 +126,9 @@ func renderLogs(entries []supervisor.LogEntry, maxBytes int) (string, int, int, 
 		if entries[i].Message != "" {
 			data += " " + entries[i].Message
 		}
-		data, truncated := truncateUTF8Bytes(data, maxLogEntryBytes)
-		line := fmt.Sprintf("%s %s %s", timeString(entries[i].Time), entries[i].Stream, data)
+		prefix := fmt.Sprintf("%s %s ", timeString(entries[i].Time), entries[i].Stream)
+		data, truncated := truncateUTF8Bytes(data, maxLogEntryBytes-len(prefix))
+		line := prefix + data
 		lineBytes := len(line)
 		if len(lines) > 0 {
 			lineBytes++ // strings.Join adds one separator between adjacent lines.
