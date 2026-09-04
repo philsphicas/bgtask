@@ -167,6 +167,13 @@ func toTaskSummary(pt taskservice.PublicTask) TaskSummary {
 	if labelsTruncated {
 		labels = labels[:maxSummaryLabels]
 	}
+	if len(labels) > 0 {
+		safeLabels := make([]string, len(labels))
+		for i, label := range labels {
+			safeLabels[i] = sanitizeControls(label)
+		}
+		labels = safeLabels
+	}
 	summary := TaskSummary{
 		ID:               pt.ID,
 		Name:             compactName,

@@ -11,6 +11,7 @@ import (
 func TestTaskSummary_CommandPreviewSanitizesControls(t *testing.T) {
 	summary := toTaskSummary(taskservice.PublicTask{
 		Command: []string{"printf", "first\nsecond\tvalue"},
+		Labels:  []string{"first\nsecond\tvalue"},
 	})
 
 	if strings.ContainsAny(summary.CommandPreview, "\n\r\t") {
@@ -18,6 +19,9 @@ func TestTaskSummary_CommandPreviewSanitizesControls(t *testing.T) {
 	}
 	if summary.CommandPreview != "printf first second value" {
 		t.Fatalf("command preview = %q, want sanitized text", summary.CommandPreview)
+	}
+	if len(summary.Labels) != 1 || summary.Labels[0] != "first second value" {
+		t.Fatalf("labels = %q, want sanitized text", summary.Labels)
 	}
 }
 
