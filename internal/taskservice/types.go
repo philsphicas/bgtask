@@ -75,9 +75,9 @@ type ListRequest struct {
 	NewestFirst bool     // false preserves the historical ascending-ID order
 }
 
-// ListResult is returned by Service.List. Tasks are sorted by ID (which,
-// given state.GenerateID's timestamp prefix, is also chronological), so
-// bulk consumers see a deterministic snapshot.
+// ListResult is returned by Service.List. Tasks are sorted by ID, ascending by
+// default or descending when ListRequest.NewestFirst is true. The cursor pages
+// through that deterministic ordering.
 type ListResult struct {
 	Tasks      []Task
 	Total      int

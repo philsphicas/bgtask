@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/mattn/go-runewidth"
 	"github.com/philsphicas/bgtask/internal/state"
@@ -155,7 +156,7 @@ func toTaskSummary(pt taskservice.PublicTask) TaskSummary {
 		Name:           pt.Name,
 		State:          pt.Status.State,
 		Labels:         pt.Labels,
-		CommandPreview: truncateDisplay(strings.Join(pt.Command, " "), commandPreviewWidth),
+		CommandPreview: truncateDisplay(sanitizeControls(strings.Join(pt.Command, " ")), commandPreviewWidth),
 	}
 	if pt.Status.Running != nil {
 		summary.Ports = pt.Status.Running.Ports
@@ -169,6 +170,15 @@ func toTaskSummary(pt taskservice.PublicTask) TaskSummary {
 		summary.ExitedAt = timeString(pt.Status.Exited.At)
 	}
 	return summary
+}
+
+func sanitizeControls(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
 }
 
 func truncateDisplay(value string, maxWidth int) string {
