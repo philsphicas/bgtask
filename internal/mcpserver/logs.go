@@ -103,6 +103,7 @@ func (h *handlers) logs(ctx context.Context, _ *mcp.CallToolRequest, in LogsInpu
 		} else {
 			text = "No matching log entries."
 		}
+		text, _ = truncateUTF8Bytes(text, maxBytes)
 	}
 	return textResult(text), out, nil
 }
@@ -127,7 +128,10 @@ func renderLogs(entries []supervisor.LogEntry, maxBytes int) (string, int, int, 
 		}
 		data, truncated := truncateUTF8Bytes(data, maxLogEntryBytes)
 		line := fmt.Sprintf("%s %s %s", timeString(entries[i].Time), entries[i].Stream, data)
-		lineBytes := len([]byte(line)) + 1
+		lineBytes := len(line)
+		if len(lines) > 0 {
+			lineBytes++ // strings.Join adds one separator between adjacent lines.
+		}
 		if total+lineBytes > maxBytes {
 			break
 		}

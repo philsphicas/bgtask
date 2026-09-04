@@ -574,8 +574,8 @@ func TestLogs_EnforcesByteAndEntryBounds(t *testing.T) {
 		t.Fatalf("tiny-budget logs = %+v, error=%v", tinyOut, tinyRes.IsError)
 	}
 	tinyText := tinyRes.Content[0].(*mcp.TextContent).Text
-	if !strings.Contains(tinyText, "exceeded max_bytes") {
-		t.Fatalf("tiny-budget text = %q, want byte-budget explanation", tinyText)
+	if len(tinyText) > tiny {
+		t.Fatalf("tiny-budget text = %q (%d bytes), want at most %d", tinyText, len(tinyText), tiny)
 	}
 }
 
