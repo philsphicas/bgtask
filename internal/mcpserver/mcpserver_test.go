@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/philsphicas/bgtask/internal/mcpserver"
@@ -499,6 +500,10 @@ func TestList_IsBoundedCompactAndCursorPaged(t *testing.T) {
 	if first.Tasks[len(first.Tasks)-1].ID == second.Tasks[0].ID {
 		t.Fatal("cursor repeated the page boundary task")
 	}
+	text := firstRes.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, first.NextCursor) {
+		t.Fatal("text-only list response omitted the continuation cursor")
+	}
 }
 
 func TestList_RunningFilterAndInvalidLimit(t *testing.T) {
@@ -522,6 +527,27 @@ func TestList_RunningFilterAndInvalidLimit(t *testing.T) {
 	}
 }
 
+func TestGet_TextContainsFullTaskDetails(t *testing.T) {
+	svc, _ := newTestService(t)
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+	run, res := callTool[mcpserver.RunOutput](t, cs, "bgtask_run", mcpserver.RunInput{
+		Name: "details", Command: []string{"sleep", "10"}, Cwd: t.TempDir(),
+		Labels: []string{"review"}, Restart: "always", HealthCheck: "echo ok", HealthInterval: "5s",
+	})
+	if res.IsError {
+		t.Fatalf("run failed: %+v", run.Error)
+	}
+	_, getRes := callTool[mcpserver.GetOutput](t, cs, "bgtask_get", mcpserver.GetInput{Ref: run.Task.ID})
+	text := getRes.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"Command:", "Cwd:", "Labels: review", "Restart: always", "Health check:", "Supervisor PID:", "Log path:"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("get text omitted %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestLogs_EnforcesByteAndEntryBounds(t *testing.T) {
 	svc, _ := newTestService(t)
 	run, err := svc.Run(context.Background(), taskservice.RunRequest{
@@ -530,7 +556,6 @@ func TestLogs_EnforcesByteAndEntryBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	entries := []supervisor.LogEntry{
 		{Time: time.Now().Add(-time.Second), Stream: "o", Data: strings.Repeat("x", 5000)},
 		{Time: time.Now(), Stream: "e", Data: "recent failure\n"},
@@ -576,6 +601,24 @@ func TestLogs_EnforcesByteAndEntryBounds(t *testing.T) {
 	tinyText := tinyRes.Content[0].(*mcp.TextContent).Text
 	if len(tinyText) > tiny {
 		t.Fatalf("tiny-budget text = %q (%d bytes), want at most %d", tinyText, len(tinyText), tiny)
+	}
+}
+
+func TestLogs_ErrorTextHonorsValidMaxBytes(t *testing.T) {
+	svc, _ := newTestService(t)
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+	maxBytes := 2
+	out, res := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", mcpserver.LogsInput{
+		Ref: "missing", MaxBytes: &maxBytes,
+	})
+	if !res.IsError || out.Error == nil || out.Error.Code != "not_found" {
+		t.Fatalf("missing logs = %+v, error=%v", out, res.IsError)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if len(text) > maxBytes || !utf8.ValidString(text) {
+		t.Fatalf("error text = %q (%d bytes), max=%d", text, len(text), maxBytes)
 	}
 }
 

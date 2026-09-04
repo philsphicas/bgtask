@@ -44,20 +44,20 @@ type LogsOutput struct {
 }
 
 func (h *handlers) logs(ctx context.Context, _ *mcp.CallToolRequest, in LogsInput) (*mcp.CallToolResult, LogsOutput, error) {
-	tail := defaultLogTail
-	if in.Tail != nil {
-		tail = *in.Tail
-		if tail < 0 || tail > maxLogTail {
-			toolErr := toToolError(taskservice.InvalidArgument("logs", in.Ref, "", fmt.Sprintf("tail must be an integer between 0 and %d", maxLogTail)))
-			return errorResult(toolErr), LogsOutput{Error: toolErr}, nil
-		}
-	}
 	maxBytes := defaultLogMaxBytes
 	if in.MaxBytes != nil {
 		maxBytes = *in.MaxBytes
 		if maxBytes < 1 || maxBytes > maxLogMaxBytes {
 			err := toToolError(taskservice.InvalidArgument("logs", in.Ref, "", fmt.Sprintf("max_bytes must be between 1 and %d", maxLogMaxBytes)))
 			return errorResult(err), LogsOutput{Error: err}, nil
+		}
+	}
+	tail := defaultLogTail
+	if in.Tail != nil {
+		tail = *in.Tail
+		if tail < 0 || tail > maxLogTail {
+			toolErr := toToolError(taskservice.InvalidArgument("logs", in.Ref, "", fmt.Sprintf("tail must be an integer between 0 and %d", maxLogTail)))
+			return boundedLogErrorResult(toolErr, maxBytes), LogsOutput{Error: toolErr}, nil
 		}
 	}
 	stdout, stderr := false, false
@@ -69,12 +69,12 @@ func (h *handlers) logs(ctx context.Context, _ *mcp.CallToolRequest, in LogsInpu
 		stderr = true
 	default:
 		err := toToolError(taskservice.InvalidArgument("logs", in.Ref, "", "stream must be all, stdout, or stderr"))
-		return errorResult(err), LogsOutput{Error: err}, nil
+		return boundedLogErrorResult(err, maxBytes), LogsOutput{Error: err}, nil
 	}
 	since, serr := parseDuration(in.Since)
 	if serr != nil {
 		err := toToolError(taskservice.InvalidArgument("logs", in.Ref, "", fmt.Sprintf("invalid since: %v", serr)))
-		return errorResult(err), LogsOutput{Error: err}, nil
+		return boundedLogErrorResult(err, maxBytes), LogsOutput{Error: err}, nil
 	}
 
 	result, err := h.svc.Logs(ctx, taskservice.LogsRequest{
@@ -87,7 +87,7 @@ func (h *handlers) logs(ctx context.Context, _ *mcp.CallToolRequest, in LogsInpu
 	})
 	if err != nil {
 		toolErr := toToolError(err)
-		return errorResult(toolErr), LogsOutput{Error: toolErr}, nil
+		return boundedLogErrorResult(toolErr, maxBytes), LogsOutput{Error: toolErr}, nil
 	}
 	text, returned, omitted, entryTruncated := renderLogs(result.Entries, maxBytes)
 	out := LogsOutput{
@@ -106,6 +106,17 @@ func (h *handlers) logs(ctx context.Context, _ *mcp.CallToolRequest, in LogsInpu
 		text, _ = truncateUTF8Bytes(text, maxBytes)
 	}
 	return textResult(text), out, nil
+}
+
+func boundedLogErrorResult(err *ToolError, maxBytes int) *mcp.CallToolResult {
+	text := "bgtask operation failed"
+	if err != nil {
+		text = fmt.Sprintf("%s: %s", err.Code, err.Message)
+	}
+	text, _ = truncateUTF8Bytes(text, maxBytes)
+	result := textResult(text)
+	result.IsError = true
+	return result
 }
 
 func renderLogs(entries []supervisor.LogEntry, maxBytes int) (string, int, int, bool) {

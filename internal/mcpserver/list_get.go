@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"text/tabwriter"
@@ -75,6 +76,9 @@ func renderTaskList(out ListOutput) string {
 		labels := "-"
 		if len(task.Labels) > 0 {
 			labels = strings.Join(task.Labels, ",")
+			if task.LabelsTruncated {
+				labels += ",…"
+			}
 		}
 		state := task.State
 		if task.ExitCode != nil {
@@ -85,7 +89,7 @@ func renderTaskList(out ListOutput) string {
 	_ = w.Flush()
 	fmt.Fprintf(&b, "%d of %d matching tasks returned.", out.Returned, out.Total)
 	if out.NextCursor != "" {
-		b.WriteString(" More are available; call bgtask_list again with next_cursor as cursor.")
+		fmt.Fprintf(&b, " More are available; call bgtask_list again with cursor=%q.", out.NextCursor)
 	}
 	return b.String()
 }
@@ -108,5 +112,55 @@ func (h *handlers) get(ctx context.Context, _ *mcp.CallToolRequest, in GetInput)
 		return errorResult(toolErr), GetOutput{Error: toolErr}, nil
 	}
 	ti := toTaskInfo(result.Task.Public())
-	return textResult(fmt.Sprintf("%s (%s) is %s.", ti.Name, ti.ID, ti.Status.State)), GetOutput{Task: &ti}, nil
+	return textResult(renderTaskInfo(ti)), GetOutput{Task: &ti}, nil
+}
+
+func renderTaskInfo(task TaskInfo) string {
+	command, _ := json.Marshal(task.Command)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Name: %s\nID: %s\nState: %s\nCommand: %s\nCwd: %s", task.Name, task.ID, task.Status.State, command, task.Cwd)
+	if len(task.EnvKeys) > 0 {
+		fmt.Fprintf(&b, "\nEnv keys: %s", strings.Join(task.EnvKeys, ", "))
+	}
+	if len(task.Labels) > 0 {
+		fmt.Fprintf(&b, "\nLabels: %s", strings.Join(task.Labels, ", "))
+	}
+	if task.Restart != "" {
+		fmt.Fprintf(&b, "\nRestart: %s", task.Restart)
+		if task.RestartDelay != "" {
+			fmt.Fprintf(&b, " after %s", task.RestartDelay)
+		}
+	}
+	if task.HealthCheck != "" {
+		fmt.Fprintf(&b, "\nHealth check: %s every %s", task.HealthCheck, task.HealthInterval)
+	}
+	if task.CreatedAt != "" {
+		fmt.Fprintf(&b, "\nCreated: %s", task.CreatedAt)
+	}
+	if task.Status.Running != nil {
+		fmt.Fprintf(&b, "\nSupervisor PID: %d\nChild PID: %d", task.Status.Running.SupervisorPID, task.Status.Running.ChildPID)
+		if len(task.Status.Running.Ports) > 0 {
+			fmt.Fprintf(&b, "\nPorts: %v", task.Status.Running.Ports)
+		}
+		if task.Status.Running.Since != "" {
+			fmt.Fprintf(&b, "\nRunning since: %s", task.Status.Running.Since)
+		}
+	}
+	if task.Status.Exited != nil {
+		fmt.Fprintf(&b, "\nExit code: %d", task.Status.Exited.Code)
+		if task.Status.Exited.Signal != "" {
+			fmt.Fprintf(&b, "\nSignal: %s", task.Status.Exited.Signal)
+		}
+		if task.Status.Exited.At != "" {
+			fmt.Fprintf(&b, "\nExited at: %s", task.Status.Exited.At)
+		}
+	}
+	if task.Status.Dead != nil {
+		fmt.Fprintf(&b, "\nDead: %s", task.Status.Dead.Message)
+	}
+	if task.AutoRm {
+		b.WriteString("\nAuto-remove: true")
+	}
+	fmt.Fprintf(&b, "\nLog path: %s", task.LogPath)
+	return b.String()
 }
