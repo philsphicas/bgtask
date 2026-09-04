@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -16,24 +17,26 @@ type RenameInput struct {
 
 // RenameOutput is the output for bgtask_rename.
 type RenameOutput struct {
-	Task  *TaskInfo  `json:"task,omitempty" jsonschema:"The task, under its new name."`
-	Error *ToolError `json:"error,omitempty" jsonschema:"Set only if the call failed (e.g. new_name is already in use)."`
+	TaskID  string     `json:"task_id,omitempty" jsonschema:"Canonical task ID."`
+	Name    string     `json:"name,omitempty" jsonschema:"Resulting task name."`
+	Changed bool       `json:"changed" jsonschema:"True if the name changed."`
+	NoOp    bool       `json:"no_op,omitempty" jsonschema:"True if the task already had this name."`
+	Error   *ToolError `json:"error,omitempty" jsonschema:"Set only if the call failed."`
 }
 
 func (h *handlers) rename(ctx context.Context, _ *mcp.CallToolRequest, in RenameInput) (*mcp.CallToolResult, RenameOutput, error) {
 	if strings.TrimSpace(in.NewName) == "" {
 		err := taskservice.InvalidArgument("rename", in.Ref, "", "new_name must not be empty")
-		return &mcp.CallToolResult{IsError: true}, RenameOutput{Error: toToolError(err)}, nil
+		toolErr := toToolError(err)
+		return errorResult(toolErr), RenameOutput{Error: toolErr}, nil
 	}
-	if _, err := h.svc.Rename(ctx, taskservice.RenameRequest{Ref: in.Ref, NewName: in.NewName}); err != nil {
-		return &mcp.CallToolResult{IsError: true}, RenameOutput{Error: toToolError(err)}, nil
-	}
-	got, err := h.svc.Get(ctx, in.NewName)
+	result, err := h.svc.Rename(ctx, taskservice.RenameRequest{Ref: in.Ref, NewName: in.NewName})
 	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, RenameOutput{Error: toToolError(err)}, nil
+		toolErr := toToolError(err)
+		return errorResult(toolErr), RenameOutput{Error: toolErr}, nil
 	}
-	ti := toTaskInfo(got.Task.Public())
-	return nil, RenameOutput{Task: &ti}, nil
+	out := RenameOutput{TaskID: result.TaskID, Name: result.Name, Changed: result.Changed, NoOp: result.NoOp}
+	return textResult(fmt.Sprintf("Task %s is named %s.", result.TaskID, result.Name)), out, nil
 }
 
 // SetLabelsInput is the input for bgtask_set_labels.
@@ -44,18 +47,19 @@ type SetLabelsInput struct {
 
 // SetLabelsOutput is the output for bgtask_set_labels.
 type SetLabelsOutput struct {
-	Task  *TaskInfo  `json:"task,omitempty" jsonschema:"The task, with its updated labels."`
-	Error *ToolError `json:"error,omitempty" jsonschema:"Set only if the call failed."`
+	TaskID  string     `json:"task_id,omitempty" jsonschema:"Canonical task ID."`
+	Name    string     `json:"name,omitempty" jsonschema:"Task name."`
+	Labels  []string   `json:"labels" jsonschema:"Complete resulting label set."`
+	Changed bool       `json:"changed" jsonschema:"True if labels were written."`
+	Error   *ToolError `json:"error,omitempty" jsonschema:"Set only if the call failed."`
 }
 
 func (h *handlers) setLabels(ctx context.Context, _ *mcp.CallToolRequest, in SetLabelsInput) (*mcp.CallToolResult, SetLabelsOutput, error) {
-	if _, err := h.svc.SetLabels(ctx, taskservice.SetLabelsRequest{Ref: in.Ref, Labels: in.Labels}); err != nil {
-		return &mcp.CallToolResult{IsError: true}, SetLabelsOutput{Error: toToolError(err)}, nil
-	}
-	got, err := h.svc.Get(ctx, in.Ref)
+	result, err := h.svc.SetLabels(ctx, taskservice.SetLabelsRequest{Ref: in.Ref, Labels: in.Labels})
 	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, SetLabelsOutput{Error: toToolError(err)}, nil
+		toolErr := toToolError(err)
+		return errorResult(toolErr), SetLabelsOutput{Error: toolErr}, nil
 	}
-	ti := toTaskInfo(got.Task.Public())
-	return nil, SetLabelsOutput{Task: &ti}, nil
+	out := SetLabelsOutput{TaskID: result.TaskID, Name: result.Name, Labels: result.Labels, Changed: result.Changed}
+	return textResult(fmt.Sprintf("Set labels on %s (%s).", result.Name, result.TaskID)), out, nil
 }

@@ -15,6 +15,19 @@ type SelectionInput struct {
 	All    bool     `json:"all,omitempty" jsonschema:"Target every task. Processed best-effort. Exactly one of refs, labels, or all must be set."`
 }
 
+func selectionMode(sel SelectionInput) string {
+	switch {
+	case len(sel.Refs) > 0:
+		return "refs"
+	case len(sel.Labels) > 0:
+		return "labels"
+	case sel.All:
+		return "all"
+	default:
+		return ""
+	}
+}
+
 // parseSelection validates that sel specifies exactly one selection mode
 // and converts it to a taskservice.Selection.
 func parseSelection(sel SelectionInput) (taskservice.Selection, error) {
@@ -30,6 +43,9 @@ func parseSelection(sel SelectionInput) (taskservice.Selection, error) {
 	}
 	if modes != 1 {
 		return taskservice.Selection{}, fmt.Errorf("selection must specify exactly one of refs, labels, or all")
+	}
+	if len(sel.Refs) > maxBatchItems {
+		return taskservice.Selection{}, fmt.Errorf("refs must contain at most %d tasks", maxBatchItems)
 	}
 	return taskservice.Selection{Names: sel.Refs, Labels: sel.Labels, All: sel.All}, nil
 }

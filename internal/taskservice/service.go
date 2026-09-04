@@ -147,6 +147,10 @@ func (s *Service) toTask(id string, meta *state.Meta) Task {
 // exit.json (exited), then the supervisor PID's liveness (running/dead),
 // falling back to "unknown" if neither is determinable.
 func (s *Service) resolveStatus(id string) state.TaskStatus {
+	return s.resolveStatusWithPorts(id, true)
+}
+
+func (s *Service) resolveStatusWithPorts(id string, withPorts bool) state.TaskStatus {
 	exit, _ := s.Store.ReadExit(id)
 	if exit != nil {
 		return state.TaskStatus{
@@ -164,7 +168,7 @@ func (s *Service) resolveStatus(id string) state.TaskStatus {
 		if alive {
 			childPID, _ := s.Store.ReadPID(id, "child.pid")
 			var ports []uint32
-			if childPID > 0 {
+			if withPorts && childPID > 0 {
 				ports = s.Process.ListeningPorts(childPID)
 			}
 			since := s.Store.ReadChildStartTime(id)

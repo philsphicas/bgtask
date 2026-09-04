@@ -3,7 +3,7 @@ package mcpserver
 import (
 	"context"
 	"fmt"
-	"os"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/philsphicas/bgtask/internal/taskservice"
@@ -13,7 +13,7 @@ import (
 type RunInput struct {
 	Name            string            `json:"name,omitempty" jsonschema:"Task name. If omitted, one is auto-generated from the command."`
 	Command         []string          `json:"command" jsonschema:"The command and its arguments to launch, as an argv-style list (must not be empty)."`
-	Cwd             string            `json:"cwd,omitempty" jsonschema:"Working directory for the command. Defaults to the bgtask server process's own working directory."`
+	Cwd             string            `json:"cwd" jsonschema:"Required working directory for the command. Agents must pass an explicit absolute or server-valid path."`
 	Env             map[string]string `json:"env,omitempty" jsonschema:"Environment variable overrides for the command, as name/value pairs. Only the names are ever reported back by other tools; values are never echoed."`
 	Labels          []string          `json:"labels,omitempty" jsonschema:"Labels to attach to the new task, usable later to target it (alongside others) in bulk operations."`
 	Restart         string            `json:"restart,omitempty" jsonschema:"Restart policy: omit for never, or \"always\", or \"on-failure\"."`
@@ -26,45 +26,44 @@ type RunInput struct {
 
 // RunOutput is the output for bgtask_run.
 type RunOutput struct {
-	Task             *TaskInfo   `json:"task,omitempty" jsonschema:"The newly launched task."`
-	PID              int         `json:"pid,omitempty" jsonschema:"Process ID of the launched supervisor."`
-	NoBreakaway      bool        `json:"no_breakaway,omitempty" jsonschema:"True if the supervisor could not detach from a Windows job object."`
-	ReplacedExisting bool        `json:"replaced_existing,omitempty" jsonschema:"True if an existing task with the same name was stopped and replaced."`
-	AutoRemoved      bool        `json:"auto_removed,omitempty" jsonschema:"True if this was an --rm task whose command finished so quickly its state was already removed before launch could be confirmed (a successful terminal outcome)."`
-	ImmediateExit    *ExitedInfo `json:"immediate_exit,omitempty" jsonschema:"Set if the task had already exited by the time the call returned (e.g. a bad command)."`
-	Error            *ToolError  `json:"error,omitempty" jsonschema:"Set only if the call failed; no task was launched."`
+	Task             *TaskSummary `json:"task,omitempty" jsonschema:"Compact summary of the newly launched task."`
+	PID              int          `json:"pid,omitempty" jsonschema:"Process ID of the launched supervisor."`
+	Cwd              string       `json:"cwd,omitempty" jsonschema:"Resolved working directory."`
+	LogPath          string       `json:"log_path,omitempty" jsonschema:"Path to the current task log."`
+	NoBreakaway      bool         `json:"no_breakaway,omitempty" jsonschema:"True if the supervisor could not detach from a Windows job object."`
+	ReplacedExisting bool         `json:"replaced_existing,omitempty" jsonschema:"True if an existing task with the same name was stopped and replaced."`
+	AutoRemoved      bool         `json:"auto_removed,omitempty" jsonschema:"True if this was an --rm task whose command finished so quickly its state was already removed before launch could be confirmed (a successful terminal outcome)."`
+	ImmediateExit    *ExitedInfo  `json:"immediate_exit,omitempty" jsonschema:"Set if the task had already exited by the time the call returned (e.g. a bad command)."`
+	Error            *ToolError   `json:"error,omitempty" jsonschema:"Set only if the call failed; no task was launched."`
 }
 
 func (h *handlers) run(ctx context.Context, _ *mcp.CallToolRequest, in RunInput) (*mcp.CallToolResult, RunOutput, error) {
 	if len(in.Command) == 0 {
 		err := taskservice.InvalidArgument("run", in.Name, "", "command must not be empty")
-		return &mcp.CallToolResult{IsError: true}, RunOutput{Error: toToolError(err)}, nil
+		toolErr := toToolError(err)
+		return errorResult(toolErr), RunOutput{Error: toolErr}, nil
+	}
+	if strings.TrimSpace(in.Cwd) == "" {
+		toolErr := toToolError(taskservice.InvalidArgument("run", in.Name, "", "cwd must not be empty"))
+		return errorResult(toolErr), RunOutput{Error: toolErr}, nil
 	}
 	restartDelay, derr := parseDuration(in.RestartDelay)
 	if derr != nil {
 		err := taskservice.InvalidArgument("run", in.Name, "", fmt.Sprintf("invalid restart_delay: %v", derr))
-		return &mcp.CallToolResult{IsError: true}, RunOutput{Error: toToolError(err)}, nil
+		toolErr := toToolError(err)
+		return errorResult(toolErr), RunOutput{Error: toolErr}, nil
 	}
 	healthInterval, ierr := parseDuration(in.HealthInterval)
 	if ierr != nil {
 		err := taskservice.InvalidArgument("run", in.Name, "", fmt.Sprintf("invalid health_interval: %v", ierr))
-		return &mcp.CallToolResult{IsError: true}, RunOutput{Error: toToolError(err)}, nil
-	}
-
-	cwd := in.Cwd
-	if cwd == "" {
-		wd, werr := os.Getwd()
-		if werr != nil {
-			err := taskservice.Internal("run", in.Name, "", werr)
-			return &mcp.CallToolResult{IsError: true}, RunOutput{Error: toToolError(err)}, nil
-		}
-		cwd = wd
+		toolErr := toToolError(err)
+		return errorResult(toolErr), RunOutput{Error: toolErr}, nil
 	}
 
 	result, err := h.svc.Run(ctx, taskservice.RunRequest{
 		Name:            in.Name,
 		Command:         in.Command,
-		Cwd:             cwd,
+		Cwd:             in.Cwd,
 		EnvOverrides:    in.Env,
 		Labels:          in.Labels,
 		Restart:         in.Restart,
@@ -75,13 +74,16 @@ func (h *handlers) run(ctx context.Context, _ *mcp.CallToolRequest, in RunInput)
 		ReplaceExisting: in.ReplaceExisting,
 	})
 	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, RunOutput{Error: toToolError(err)}, nil
+		toolErr := toToolError(err)
+		return errorResult(toolErr), RunOutput{Error: toolErr}, nil
 	}
 
-	ti := toTaskInfo(result.Task.Public())
+	ti := toTaskSummary(result.Task.Public())
 	out := RunOutput{
 		Task:             &ti,
 		PID:              result.PID,
+		Cwd:              result.Task.Meta.Cwd,
+		LogPath:          result.Task.LogPath,
 		NoBreakaway:      result.NoBreakaway,
 		ReplacedExisting: result.ReplacedExisting,
 		AutoRemoved:      result.AutoRemoved,
@@ -93,5 +95,5 @@ func (h *handlers) run(ctx context.Context, _ *mcp.CallToolRequest, in RunInput)
 			At:     timeString(result.ImmediateExit.ExitedAt),
 		}
 	}
-	return nil, out, nil
+	return textResult(fmt.Sprintf("Started %s (%s), state %s.", ti.Name, ti.ID, ti.State)), out, nil
 }

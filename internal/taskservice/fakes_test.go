@@ -22,6 +22,7 @@ type fakeEnv struct {
 	deadAfter  map[int]time.Time
 	createTime map[int]int64
 	ports      map[int][]uint32
+	portCalls  int
 
 	launches    int
 	launchErr   error
@@ -174,7 +175,14 @@ func (f *fakeEnv) SignalKill(pid int) error {
 func (f *fakeEnv) ListeningPorts(pid int) []uint32 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.portCalls++
 	return f.ports[pid]
+}
+
+func (f *fakeEnv) portCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.portCalls
 }
 
 func (f *fakeEnv) launchCount() int {

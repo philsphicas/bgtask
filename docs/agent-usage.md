@@ -95,7 +95,7 @@ The server exposes these tools:
 
 | Tool                | Purpose                                   |
 | ------------------- | ----------------------------------------- |
-| `bgtask_list`       | List tasks, optionally filtered by labels |
+| `bgtask_list`       | List compact, filtered, paged task summaries |
 | `bgtask_get`        | Get task configuration and current status |
 | `bgtask_run`        | Launch a supervised background command    |
 | `bgtask_logs`       | Read a bounded log snapshot               |
@@ -109,6 +109,30 @@ The server exposes these tools:
 
 MCP task creation does not replace a duplicate name unless
 `replace_existing: true` is explicitly supplied.
+
+`bgtask_run` requires an explicit `cwd`. This avoids accidentally launching in
+the server process's own working directory, which may be unrelated to the
+project the agent is handling.
+
+### Read tasks without flooding context
+
+List is intentionally compact; get is intentionally complete:
+
+```json
+{"states":["running"],"limit":20}
+```
+
+The response includes `returned`, the total number matching the filters, and
+`next_cursor` when another page exists. Pass that token back unchanged:
+
+```json
+{"states":["running"],"limit":20,"cursor":"<next_cursor>"}
+```
+
+Use `bgtask_get` on one returned name or ID for exact argv, cwd, environment
+key names, restart/health configuration, PIDs, ports, timestamps, and log path.
+Labels use OR semantics; when both labels and states are supplied, a task must
+match both filter groups.
 
 ## Start a one-off Copilot CLI agent
 
@@ -180,6 +204,26 @@ Stop and remove every task labeled `preview`, but leave all other tasks alone.
 Agents should prefer canonical task IDs returned by bgtask for later mutations.
 Names remain supported for convenience.
 
+For `bgtask_start`, `bgtask_stop`, `bgtask_restart`, and `bgtask_remove`, set
+exactly one top-level selector:
+
+```json
+{"refs":["task-a","task-b"]}
+```
+
+```json
+{"labels":["preview"]}
+```
+
+```json
+{"all":true}
+```
+
+Explicit refs are processed in order and stop at the first failure. Label and
+all selections are best-effort. Responses always include exact aggregate
+counts; detailed items are prioritized and capped at 50, with `items_omitted`
+showing how many routine details were left out.
+
 ## Verify with REST
 
 REST is useful for setup checks and non-MCP automation:
@@ -205,11 +249,16 @@ tasks. The servers do not maintain separate in-memory task databases.
 
 ## Logs
 
-REST and MCP return bounded log snapshots:
+REST and MCP return bounded log snapshots. For MCP:
 
-- default: 200 entries
-- maximum: 5000 entries
+- default: 100 entries and 32 KiB rendered text
+- maximum: 2000 entries and 128 KiB rendered text
+- `stream`: `all` (default), `stdout`, or `stderr`
+- individual entries are capped at 4 KiB
+- omission and truncation are reported in structured metadata
 - call again to poll for new entries
+
+REST retains its existing default of 200 entries and maximum of 5000.
 
 Use the CLI when continuous follow behavior is needed:
 

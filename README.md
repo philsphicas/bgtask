@@ -272,6 +272,22 @@ The MCP endpoint exposes:
 `bgtask_stop`, `bgtask_restart`, `bgtask_rename`, `bgtask_set_labels`,
 `bgtask_remove`, and `bgtask_cleanup`.
 
+`bgtask_list` returns compact task summaries rather than complete task
+configuration. It supports `states` and `labels` filters, returns 20 tasks by
+default (maximum 100), and uses `next_cursor`/`cursor` for continuation. For
+example, use `{"states":["running"]}` to inventory currently running tasks,
+then call `bgtask_get` with a returned name or ID when exact argv, cwd, PIDs,
+restart settings, or log paths are needed.
+
+`bgtask_logs` is bounded by both entry count (default 100, maximum 2000) and
+rendered bytes (default 32 KiB, maximum 128 KiB). Select `stream` as `all`,
+`stdout`, or `stderr`; truncation is reported explicitly.
+
+Lifecycle tools accept exactly one top-level selector: `refs`, `labels`, or
+`all`. Their responses contain complete aggregate counts and at most 50
+prioritized per-task details, rather than repeating full task configuration for
+every affected task.
+
 ![REST and MCP server demo](https://github.com/philsphicas/bgtask/releases/download/assets/server-demo.gif)
 
 Configure any MCP client that supports Streamable HTTP with:
@@ -287,9 +303,10 @@ Configure any MCP client that supports Streamable HTTP with:
 }
 ```
 
-MCP and REST log reads are bounded snapshots (default 200, maximum 5000);
-poll again for newer entries. The CLI remains the interface for following logs
-continuously with `bgtask logs -f`.
+MCP and REST log reads are bounded snapshots; poll again for newer entries. MCP
+uses the stricter count and byte limits described above. REST retains its
+existing default of 200 entries and maximum of 5000. The CLI remains the
+interface for following logs continuously with `bgtask logs -f`.
 
 See [Using bgtask from an agent](docs/agent-usage.md) for Windows-to-WSL setup,
 MCP configuration, tool descriptions, example agent prompts, and REST
