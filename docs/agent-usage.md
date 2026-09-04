@@ -93,19 +93,19 @@ machine. A cloud client requires a separately secured, routable endpoint.
 
 The server exposes these tools:
 
-| Tool                | Purpose                                   |
-| ------------------- | ----------------------------------------- |
+| Tool                | Purpose                                      |
+| ------------------- | -------------------------------------------- |
 | `bgtask_list`       | List compact, filtered, paged task summaries |
-| `bgtask_get`        | Get task configuration and current status |
-| `bgtask_run`        | Launch a supervised background command    |
-| `bgtask_logs`       | Read a bounded log snapshot               |
-| `bgtask_start`      | Re-launch stopped tasks                   |
-| `bgtask_stop`       | Gracefully or forcibly stop tasks         |
-| `bgtask_restart`    | Restart running tasks                     |
-| `bgtask_rename`     | Rename a task                             |
-| `bgtask_set_labels` | Replace task labels                       |
-| `bgtask_remove`     | Stop and permanently remove tasks         |
-| `bgtask_cleanup`    | Remove state for every non-running task   |
+| `bgtask_get`        | Get task configuration and current status    |
+| `bgtask_run`        | Launch a supervised background command       |
+| `bgtask_logs`       | Read a bounded log snapshot                  |
+| `bgtask_start`      | Re-launch stopped tasks                      |
+| `bgtask_stop`       | Gracefully or forcibly stop tasks            |
+| `bgtask_restart`    | Restart running tasks                        |
+| `bgtask_rename`     | Rename a task                                |
+| `bgtask_set_labels` | Replace task labels                          |
+| `bgtask_remove`     | Stop and permanently remove tasks            |
+| `bgtask_cleanup`    | Remove state for every non-running task      |
 
 MCP task creation does not replace a duplicate name unless
 `replace_existing: true` is explicitly supplied.
@@ -119,14 +119,14 @@ project the agent is handling.
 List is intentionally compact; get is intentionally complete:
 
 ```json
-{"states":["running"],"limit":20}
+{ "states": ["running"], "limit": 20 }
 ```
 
 The response includes `returned`, the total number matching the filters, and
 `next_cursor` when another page exists. Pass that token back unchanged:
 
 ```json
-{"states":["running"],"limit":20,"cursor":"<next_cursor>"}
+{ "states": ["running"], "limit": 20, "cursor": "<next_cursor>" }
 ```
 
 Use `bgtask_get` on one returned name or ID for exact argv, cwd, environment
@@ -208,15 +208,15 @@ For `bgtask_start`, `bgtask_stop`, `bgtask_restart`, and `bgtask_remove`, set
 exactly one top-level selector:
 
 ```json
-{"refs":["task-a","task-b"]}
+{ "refs": ["task-a", "task-b"] }
 ```
 
 ```json
-{"labels":["preview"]}
+{ "labels": ["preview"] }
 ```
 
 ```json
-{"all":true}
+{ "all": true }
 ```
 
 Explicit refs are processed in order and stop at the first failure. Label and

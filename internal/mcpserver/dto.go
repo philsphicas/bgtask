@@ -7,7 +7,6 @@ import (
 
 	"github.com/mattn/go-runewidth"
 	"github.com/philsphicas/bgtask/internal/state"
-	"github.com/philsphicas/bgtask/internal/supervisor"
 	"github.com/philsphicas/bgtask/internal/taskservice"
 )
 
@@ -77,18 +76,6 @@ type ExitedInfo struct {
 // DeadInfo mirrors state.DeadInfo.
 type DeadInfo struct {
 	Message string `json:"message" jsonschema:"Human-readable explanation of why the task is considered dead."`
-}
-
-// LogEntryInfo mirrors supervisor.LogEntry, with its timestamp rendered as
-// an RFC3339 string.
-type LogEntryInfo struct {
-	Time    string `json:"time" jsonschema:"Entry timestamp, RFC3339."`
-	Stream  string `json:"stream" jsonschema:"\"o\" (stdout), \"e\" (stderr), or \"x\" (a supervisor lifecycle event, e.g. restart/health-check)."`
-	Data    string `json:"data" jsonschema:"The output text (for \"o\"/\"e\") or a short event description (for \"x\")."`
-	Code    *int   `json:"code,omitempty" jsonschema:"Process exit code, present on lifecycle exit entries."`
-	Attempt *int   `json:"attempt,omitempty" jsonschema:"Restart attempt number, present on lifecycle restart entries."`
-	Delay   string `json:"delay,omitempty" jsonschema:"Delay before the next restart attempt, as a Go duration string."`
-	Message string `json:"message,omitempty" jsonschema:"Additional detail, e.g. health check output or an error description."`
 }
 
 // BatchItemInfo is the per-task outcome within a bulk lifecycle operation
@@ -214,18 +201,6 @@ func toStatusInfo(ts state.TaskStatus) StatusInfo {
 		out.Dead = &DeadInfo{Message: ts.Dead.Message}
 	}
 	return out
-}
-
-func toLogEntryInfo(e supervisor.LogEntry) LogEntryInfo {
-	return LogEntryInfo{
-		Time:    timeString(e.Time),
-		Stream:  e.Stream,
-		Data:    e.Data,
-		Code:    e.Code,
-		Attempt: e.Attempt,
-		Delay:   e.Delay,
-		Message: e.Message,
-	}
 }
 
 func toBatchItemInfo(item taskservice.BatchItem) BatchItemInfo {
