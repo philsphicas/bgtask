@@ -1,11 +1,17 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"math"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/philsphicas/bgtask/internal/supervisor"
 	"github.com/philsphicas/bgtask/internal/taskservice"
@@ -41,6 +47,161 @@ type LogsOutput struct {
 	EntryTruncated   bool       `json:"entry_truncated,omitempty" jsonschema:"True when at least one individual entry exceeded 4096 bytes."`
 	HasAnyLogFile    bool       `json:"has_any_log_file" jsonschema:"True if the task has ever produced a log file."`
 	Error            *ToolError `json:"error,omitempty" jsonschema:"Set only if the call failed."`
+}
+
+func addLogsTool(server *mcp.Server, h *handlers) {
+	inputSchema, err := jsonschema.For[LogsInput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("derive bgtask_logs input schema: %v", err))
+	}
+	outputSchema, err := jsonschema.For[LogsOutput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("derive bgtask_logs output schema: %v", err))
+	}
+	server.AddTool(&mcp.Tool{
+		Name: "bgtask_logs",
+		Description: "Read a text snapshot of task logs, bounded by both entry count (default 100, max 2000) and rendered bytes " +
+			"(default 32768, max 131072). Filter with stream=all|stdout|stderr and since; set all to include prior runs. " +
+			"Truncation is reported explicitly. This tool never follows or streams.",
+		InputSchema:  inputSchema,
+		OutputSchema: outputSchema,
+		Annotations:  &mcp.ToolAnnotations{Title: "Tasks: Logs", ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: boolPtr(false)},
+	}, h.logsRaw)
+}
+
+func (h *handlers) logsRaw(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	raw := req.Params.Arguments
+	if len(raw) == 0 {
+		raw = json.RawMessage(`{}`)
+	}
+	maxBytes := logMaxBytesFromArguments(raw)
+	input, err := decodeLogsInput(raw)
+	if err != nil {
+		return structuredLogsError(taskservice.InvalidArgument("logs", "", "", fmt.Sprintf("invalid arguments: %v", err)), maxBytes), nil
+	}
+	if strings.TrimSpace(input.Ref) == "" {
+		return structuredLogsError(taskservice.InvalidArgument("logs", "", "", "ref must not be empty"), maxBytes), nil
+	}
+	result, output, err := h.logs(ctx, req, input)
+	if err != nil {
+		return nil, err
+	}
+	return setLogsStructuredContent(result, output), nil
+}
+
+func decodeLogsInput(raw json.RawMessage) (LogsInput, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var fields map[string]any
+	if err := decoder.Decode(&fields); err != nil {
+		return LogsInput{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return LogsInput{}, fmt.Errorf("expected one JSON object")
+	}
+	allowed := map[string]bool{"ref": true, "tail": true, "since": true, "all": true, "stream": true, "max_bytes": true}
+	for key := range fields {
+		if !allowed[key] {
+			return LogsInput{}, fmt.Errorf("unknown field %q", key)
+		}
+	}
+	var input LogsInput
+	var err error
+	if input.Ref, err = stringField(fields, "ref"); err != nil {
+		return LogsInput{}, err
+	}
+	if input.Since, err = stringField(fields, "since"); err != nil {
+		return LogsInput{}, err
+	}
+	if input.Stream, err = stringField(fields, "stream"); err != nil {
+		return LogsInput{}, err
+	}
+	if input.All, err = boolField(fields, "all"); err != nil {
+		return LogsInput{}, err
+	}
+	if input.Tail, err = intPointerField(fields, "tail"); err != nil {
+		return LogsInput{}, err
+	}
+	if input.MaxBytes, err = intPointerField(fields, "max_bytes"); err != nil {
+		return LogsInput{}, err
+	}
+	return input, nil
+}
+
+func stringField(fields map[string]any, key string) (string, error) {
+	value, ok := fields[key]
+	if !ok {
+		return "", nil
+	}
+	if value == nil {
+		return "", fmt.Errorf("%s must be a string", key)
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", key)
+	}
+	return text, nil
+}
+
+func boolField(fields map[string]any, key string) (bool, error) {
+	value, ok := fields[key]
+	if !ok {
+		return false, nil
+	}
+	if value == nil {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	flag, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return flag, nil
+}
+
+func intPointerField(fields map[string]any, key string) (*int, error) {
+	value, ok := fields[key]
+	if !ok || value == nil {
+		return nil, nil
+	}
+	number, ok := value.(json.Number)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an integer", key)
+	}
+	parsed, err := strconv.ParseFloat(number.String(), 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed != math.Trunc(parsed) ||
+		parsed < float64(math.MinInt) || parsed > float64(math.MaxInt) {
+		return nil, fmt.Errorf("%s must be an integer", key)
+	}
+	result := int(parsed)
+	return &result, nil
+}
+
+func logMaxBytesFromArguments(raw json.RawMessage) int {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var fields map[string]any
+	if err := decoder.Decode(&fields); err != nil {
+		return defaultLogMaxBytes
+	}
+	value, err := intPointerField(fields, "max_bytes")
+	if err == nil && value != nil && *value >= 1 && *value <= maxLogMaxBytes {
+		return *value
+	}
+	return defaultLogMaxBytes
+}
+
+func structuredLogsError(err error, maxBytes int) *mcp.CallToolResult {
+	toolErr := toToolError(err)
+	return setLogsStructuredContent(boundedLogErrorResult(toolErr, maxBytes), LogsOutput{Error: toolErr})
+}
+
+func setLogsStructuredContent(result *mcp.CallToolResult, output LogsOutput) *mcp.CallToolResult {
+	raw, err := json.Marshal(output)
+	if err != nil {
+		panic(fmt.Sprintf("marshal bgtask_logs output: %v", err))
+	}
+	result.StructuredContent = json.RawMessage(raw)
+	return result
 }
 
 func (h *handlers) logs(ctx context.Context, _ *mcp.CallToolRequest, in LogsInput) (*mcp.CallToolResult, LogsOutput, error) {

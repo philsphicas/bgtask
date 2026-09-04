@@ -42,3 +42,20 @@ func TestTaskSummary_BoundsCompactNameAndLabels(t *testing.T) {
 		t.Fatalf("ID = %q, want canonical-id", summary.ID)
 	}
 }
+
+func TestTaskSummary_BoundsZeroWidthUnicodeBytes(t *testing.T) {
+	value := strings.Repeat("n", taskNamePreviewWidth) + strings.Repeat("\u0301", 100000)
+	summary := toTaskSummary(taskservice.PublicTask{
+		Name:    value,
+		Command: []string{value},
+	})
+
+	if !summary.NameTruncated || len(summary.Name) > taskNamePreviewMaxBytes ||
+		runewidth.StringWidth(summary.Name) > taskNamePreviewWidth {
+		t.Fatalf("name is %d bytes/%d columns, truncated=%v", len(summary.Name), runewidth.StringWidth(summary.Name), summary.NameTruncated)
+	}
+	if !summary.CommandTruncated || len(summary.CommandPreview) > commandPreviewMaxBytes ||
+		runewidth.StringWidth(summary.CommandPreview) > commandPreviewWidth {
+		t.Fatalf("command is %d bytes/%d columns, truncated=%v", len(summary.CommandPreview), runewidth.StringWidth(summary.CommandPreview), summary.CommandTruncated)
+	}
+}

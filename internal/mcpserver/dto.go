@@ -13,22 +13,25 @@ import (
 
 const commandPreviewWidth = 120
 const taskNamePreviewWidth = 80
+const commandPreviewMaxBytes = 512
+const taskNamePreviewMaxBytes = 256
 const maxSummaryLabels = 10
 
 // TaskSummary is the compact projection used by collection and mutation
 // responses. Full configuration remains exclusive to TaskInfo/bgtask_get.
 type TaskSummary struct {
-	ID              string   `json:"id" jsonschema:"Canonical task ID."`
-	Name            string   `json:"name" jsonschema:"Task name."`
-	NameTruncated   bool     `json:"name_truncated,omitempty" jsonschema:"True when name is a shortened display value; use id as the canonical reference."`
-	State           string   `json:"state" jsonschema:"One of running, exited, dead, or unknown."`
-	Ports           []uint32 `json:"ports,omitempty" jsonschema:"Listening TCP ports, for a running task."`
-	Labels          []string `json:"labels,omitempty" jsonschema:"Labels attached to the task."`
-	LabelsTruncated bool     `json:"labels_truncated,omitempty" jsonschema:"True when additional labels were omitted from this compact summary."`
-	CommandPreview  string   `json:"command_preview" jsonschema:"Display-only command preview; call bgtask_get for the exact argv."`
-	Since           string   `json:"since,omitempty" jsonschema:"Running since time, RFC3339."`
-	ExitCode        *int     `json:"exit_code,omitempty" jsonschema:"Process exit code, present for exited tasks, including zero."`
-	ExitedAt        string   `json:"exited_at,omitempty" jsonschema:"Exit time, RFC3339."`
+	ID               string   `json:"id" jsonschema:"Canonical task ID."`
+	Name             string   `json:"name" jsonschema:"Task name."`
+	NameTruncated    bool     `json:"name_truncated,omitempty" jsonschema:"True when name is a shortened display value; use id as the canonical reference."`
+	State            string   `json:"state" jsonschema:"One of running, exited, dead, or unknown."`
+	Ports            []uint32 `json:"ports,omitempty" jsonschema:"Listening TCP ports, for a running task."`
+	Labels           []string `json:"labels,omitempty" jsonschema:"Labels attached to the task."`
+	LabelsTruncated  bool     `json:"labels_truncated,omitempty" jsonschema:"True when additional labels were omitted from this compact summary."`
+	CommandPreview   string   `json:"command_preview" jsonschema:"Display-only command preview; call bgtask_get for the exact argv."`
+	CommandTruncated bool     `json:"command_truncated,omitempty" jsonschema:"True when command_preview is shortened; call bgtask_get for exact argv."`
+	Since            string   `json:"since,omitempty" jsonschema:"Running since time, RFC3339."`
+	ExitCode         *int     `json:"exit_code,omitempty" jsonschema:"Process exit code, present for exited tasks, including zero."`
+	ExitedAt         string   `json:"exited_at,omitempty" jsonschema:"Exit time, RFC3339."`
 }
 
 // TaskInfo is the MCP wire-format projection of a task. Like
@@ -156,20 +159,23 @@ func toTaskInfo(pt taskservice.PublicTask) TaskInfo {
 
 func toTaskSummary(pt taskservice.PublicTask) TaskSummary {
 	name := sanitizeControls(pt.Name)
-	compactName := truncateDisplay(name, taskNamePreviewWidth)
+	compactName, nameTruncated := truncateCompact(name, taskNamePreviewWidth, taskNamePreviewMaxBytes)
+	command := sanitizeControls(strings.Join(pt.Command, " "))
+	commandPreview, commandTruncated := truncateCompact(command, commandPreviewWidth, commandPreviewMaxBytes)
 	labels := pt.Labels
 	labelsTruncated := len(labels) > maxSummaryLabels
 	if labelsTruncated {
 		labels = labels[:maxSummaryLabels]
 	}
 	summary := TaskSummary{
-		ID:              pt.ID,
-		Name:            compactName,
-		NameTruncated:   compactName != name,
-		State:           pt.Status.State,
-		Labels:          labels,
-		LabelsTruncated: labelsTruncated,
-		CommandPreview:  truncateDisplay(sanitizeControls(strings.Join(pt.Command, " ")), commandPreviewWidth),
+		ID:               pt.ID,
+		Name:             compactName,
+		NameTruncated:    nameTruncated,
+		State:            pt.Status.State,
+		Labels:           labels,
+		LabelsTruncated:  labelsTruncated,
+		CommandPreview:   commandPreview,
+		CommandTruncated: commandTruncated,
 	}
 	if pt.Status.Running != nil {
 		summary.Ports = pt.Status.Running.Ports
@@ -183,6 +189,15 @@ func toTaskSummary(pt taskservice.PublicTask) TaskSummary {
 		summary.ExitedAt = timeString(pt.Status.Exited.At)
 	}
 	return summary
+}
+
+func truncateCompact(value string, maxWidth, maxBytes int) (string, bool) {
+	compact := truncateDisplay(value, maxWidth)
+	if len(compact) > maxBytes {
+		compact, _ = truncateUTF8Bytes(compact, maxBytes)
+		compact = truncateDisplay(compact, maxWidth)
+	}
+	return compact, compact != value
 }
 
 func sanitizeControls(value string) string {

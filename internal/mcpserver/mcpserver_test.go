@@ -541,7 +541,7 @@ func TestGet_TextContainsFullTaskDetails(t *testing.T) {
 	}
 	_, getRes := callTool[mcpserver.GetOutput](t, cs, "bgtask_get", mcpserver.GetInput{Ref: run.Task.ID})
 	text := getRes.Content[0].(*mcp.TextContent).Text
-	for _, want := range []string{"Command:", "Cwd:", "Labels: review", "Restart: always", "Health check:", "Supervisor PID:", "Log path:"} {
+	for _, want := range []string{"Command:", "Cwd:", `Labels: ["review"]`, "Restart: always", "Health check:", "Supervisor PID:", "Log path:"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("get text omitted %q:\n%s", want, text)
 		}
@@ -620,6 +620,48 @@ func TestLogs_ErrorTextHonorsValidMaxBytes(t *testing.T) {
 	if len(text) > maxBytes || !utf8.ValidString(text) {
 		t.Fatalf("error text = %q (%d bytes), max=%d", text, len(text), maxBytes)
 	}
+}
+
+func TestLogs_PreHandlerValidationHonorsValidMaxBytes(t *testing.T) {
+	svc, _ := newTestService(t)
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+
+	for name, arguments := range map[string]map[string]any{
+		"missing ref":           {"max_bytes": 2},
+		"wrong tail":            {"ref": "task", "tail": "many", "max_bytes": 2},
+		"unknown field":         {"ref": "task", "extra": true, "max_bytes": 2},
+		"case variant override": {"ref": "task", "max_bytes": 2, "MAX_BYTES": 131072},
+		"null ref":              {"ref": nil, "max_bytes": 2},
+		"null since":            {"ref": "task", "since": nil, "max_bytes": 2},
+		"null stream":           {"ref": "task", "stream": nil, "max_bytes": 2},
+		"null all":              {"ref": "task", "all": nil, "max_bytes": 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, res := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", arguments)
+			if !res.IsError || out.Error == nil || out.Error.Code != "invalid_argument" {
+				t.Fatalf("output = %+v, IsError=%v", out, res.IsError)
+			}
+			text := res.Content[0].(*mcp.TextContent).Text
+			if len(text) > 2 || !utf8.ValidString(text) {
+				t.Fatalf("text = %q (%d bytes)", text, len(text))
+			}
+		})
+	}
+
+	t.Run("integral decimal", func(t *testing.T) {
+		out, res := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", map[string]any{
+			"ref": "missing", "tail": 2.0, "max_bytes": 2.0,
+		})
+		if !res.IsError || out.Error == nil || out.Error.Code != "not_found" {
+			t.Fatalf("output = %+v, IsError=%v", out, res.IsError)
+		}
+		text := res.Content[0].(*mcp.TextContent).Text
+		if len(text) > 2 || !utf8.ValidString(text) {
+			t.Fatalf("text = %q (%d bytes)", text, len(text))
+		}
+	})
 }
 
 func TestLogs_RendersLifecycleDetails(t *testing.T) {

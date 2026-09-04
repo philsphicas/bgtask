@@ -63,7 +63,7 @@ func renderTaskList(out ListOutput) string {
 	}
 	var b strings.Builder
 	w := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "NAME\tSTATE\tPORTS\tLABELS\tCOMMAND")
+	_, _ = fmt.Fprintln(w, "ID\tNAME\tSTATE\tPORTS\tLABELS\tCOMMAND")
 	for _, task := range out.Tasks {
 		ports := "-"
 		if len(task.Ports) > 0 {
@@ -84,7 +84,7 @@ func renderTaskList(out ListOutput) string {
 		if task.ExitCode != nil {
 			state = fmt.Sprintf("exited(%d)", *task.ExitCode)
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", task.Name, state, ports, labels, task.CommandPreview)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.Name, state, ports, labels, task.CommandPreview)
 	}
 	_ = w.Flush()
 	fmt.Fprintf(&b, "%d of %d matching tasks returned.", out.Returned, out.Total)
@@ -118,12 +118,14 @@ func (h *handlers) get(ctx context.Context, _ *mcp.CallToolRequest, in GetInput)
 func renderTaskInfo(task TaskInfo) string {
 	command, _ := json.Marshal(task.Command)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Name: %s\nID: %s\nState: %s\nCommand: %s\nCwd: %s", task.Name, task.ID, task.Status.State, command, task.Cwd)
+	fmt.Fprintf(&b, "Name: %q\nID: %s\nState: %s\nCommand: %s\nCwd: %q", task.Name, task.ID, task.Status.State, command, task.Cwd)
 	if len(task.EnvKeys) > 0 {
-		fmt.Fprintf(&b, "\nEnv keys: %s", strings.Join(task.EnvKeys, ", "))
+		envKeys, _ := json.Marshal(task.EnvKeys)
+		fmt.Fprintf(&b, "\nEnv keys: %s", envKeys)
 	}
 	if len(task.Labels) > 0 {
-		fmt.Fprintf(&b, "\nLabels: %s", strings.Join(task.Labels, ", "))
+		labels, _ := json.Marshal(task.Labels)
+		fmt.Fprintf(&b, "\nLabels: %s", labels)
 	}
 	if task.Restart != "" {
 		fmt.Fprintf(&b, "\nRestart: %s", task.Restart)
@@ -132,7 +134,7 @@ func renderTaskInfo(task TaskInfo) string {
 		}
 	}
 	if task.HealthCheck != "" {
-		fmt.Fprintf(&b, "\nHealth check: %s every %s", task.HealthCheck, task.HealthInterval)
+		fmt.Fprintf(&b, "\nHealth check: %q every %s", task.HealthCheck, task.HealthInterval)
 	}
 	if task.CreatedAt != "" {
 		fmt.Fprintf(&b, "\nCreated: %s", task.CreatedAt)
@@ -156,11 +158,11 @@ func renderTaskInfo(task TaskInfo) string {
 		}
 	}
 	if task.Status.Dead != nil {
-		fmt.Fprintf(&b, "\nDead: %s", task.Status.Dead.Message)
+		fmt.Fprintf(&b, "\nDead: %q", task.Status.Dead.Message)
 	}
 	if task.AutoRm {
 		b.WriteString("\nAuto-remove: true")
 	}
-	fmt.Fprintf(&b, "\nLog path: %s", task.LogPath)
+	fmt.Fprintf(&b, "\nLog path: %q", task.LogPath)
 	return b.String()
 }

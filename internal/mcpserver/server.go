@@ -93,13 +93,7 @@ func newServer(svc *taskservice.Service, version string) *mcp.Server {
 		Annotations: &mcp.ToolAnnotations{Title: "Tasks: Run", DestructiveHint: boolPtr(true), IdempotentHint: false, OpenWorldHint: boolPtr(true)},
 	}, h.run)
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name: "bgtask_logs",
-		Description: "Read a text snapshot of task logs, bounded by both entry count (default 100, max 2000) and rendered bytes " +
-			"(default 32768, max 131072). Filter with stream=all|stdout|stderr and since; set all to include prior runs. " +
-			"Truncation is reported explicitly. This tool never follows or streams.",
-		Annotations: &mcp.ToolAnnotations{Title: "Tasks: Logs", ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: boolPtr(false)},
-	}, h.logs)
+	addLogsTool(s, h)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "bgtask_start",
