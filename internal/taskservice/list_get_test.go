@@ -164,6 +164,9 @@ func TestList_FiltersStatesAndPaginatesNewestFirst(t *testing.T) {
 	if first.Total != 3 || len(first.Tasks) != 2 || first.NextCursor == "" {
 		t.Fatalf("first page = %+v, want total 3, 2 tasks, and cursor", first)
 	}
+	if cap(first.Tasks) > 2 {
+		t.Fatalf("first page retained capacity %d, want at most the page limit", cap(first.Tasks))
+	}
 	if first.Tasks[0].ID != "20260101T000003-00000003" {
 		t.Fatalf("first task = %s, want newest ID", first.Tasks[0].ID)
 	}

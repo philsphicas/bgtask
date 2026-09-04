@@ -53,8 +53,13 @@ func (s *Service) List(ctx context.Context, req ListRequest) (*ListResult, error
 		sort.Sort(sort.Reverse(sort.StringSlice(ids)))
 	}
 
-	tasks := make([]Task, 0, len(ids))
+	taskCapacity := len(ids)
+	if req.Limit > 0 && req.Limit < taskCapacity {
+		taskCapacity = req.Limit
+	}
+	tasks := make([]Task, 0, taskCapacity)
 	total := 0
+	hasMore := false
 	for _, id := range ids {
 		meta, err := s.Store.ReadMeta(id)
 		if err != nil {
@@ -78,11 +83,14 @@ func (s *Service) List(ctx context.Context, req ListRequest) (*ListResult, error
 				continue
 			}
 		}
+		if req.Limit > 0 && len(tasks) >= req.Limit {
+			hasMore = true
+			continue
+		}
 		tasks = append(tasks, task)
 	}
 	nextCursor := ""
-	if req.Limit > 0 && len(tasks) > req.Limit {
-		tasks = tasks[:req.Limit]
+	if hasMore {
 		nextCursor, err = encodeListCursor(tasks[len(tasks)-1].ID, req.NewestFirst)
 		if err != nil {
 			return nil, Internal(op, "", "", err)

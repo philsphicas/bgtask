@@ -142,14 +142,17 @@ func renderLogs(entries []supervisor.LogEntry, maxBytes int) (string, int, int, 
 }
 
 func truncateUTF8Bytes(value string, maxBytes int) (string, bool) {
+	if maxBytes <= 0 {
+		return "", value != ""
+	}
 	if len(value) <= maxBytes {
 		return value, false
 	}
 	suffix := "…"
-	cut := maxBytes - len(suffix)
-	if cut < 0 {
-		return suffix[:maxBytes], true
+	if maxBytes < len(suffix) {
+		return strings.Repeat(".", maxBytes), true
 	}
+	cut := maxBytes - len(suffix)
 	for cut > 0 && !utf8.RuneStart(value[cut]) {
 		cut--
 	}
