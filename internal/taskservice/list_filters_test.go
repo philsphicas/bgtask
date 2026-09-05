@@ -68,3 +68,32 @@ func TestList_UnboundedFiltersOnlyScanReturnedPorts(t *testing.T) {
 		t.Fatal("unfiltered legacy list must still discover ports")
 	}
 }
+
+func TestList_CursorTreatsOmittedAndEmptyFiltersEqually(t *testing.T) {
+	svc, _ := newTestService(t)
+	for _, name := range []string{"first", "second"} {
+		mustRun(t, svc, name, []string{"sleep", "100"})
+	}
+	for _, firstFilters := range [][]string{nil, {}} {
+		first, err := svc.List(context.Background(), taskservice.ListRequest{
+			Limit: 1, Labels: firstFilters, States: firstFilters,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.NextCursor == "" {
+			t.Fatal("expected continuation cursor")
+		}
+		for _, nextFilters := range [][]string{nil, {}} {
+			next, err := svc.List(context.Background(), taskservice.ListRequest{
+				Limit: 1, Cursor: first.NextCursor, Labels: nextFilters, States: nextFilters,
+			})
+			if err != nil {
+				t.Fatalf("equivalent omitted/empty filters rejected: %v", err)
+			}
+			if next.Total != 2 || len(next.Tasks) != 1 || next.Tasks[0].ID == first.Tasks[0].ID || next.NextCursor != "" {
+				t.Fatalf("unexpected next page: %+v", next)
+			}
+		}
+	}
+}
