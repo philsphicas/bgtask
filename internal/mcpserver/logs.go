@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -167,13 +166,48 @@ func intPointerField(fields map[string]any, key string) (*int, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s must be an integer", key)
 	}
-	parsed, err := strconv.ParseFloat(number.String(), 64)
-	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed != math.Trunc(parsed) ||
-		parsed < float64(math.MinInt) || parsed > float64(math.MaxInt) {
+	result, err := exactJSONInteger(number)
+	if err != nil {
 		return nil, fmt.Errorf("%s must be an integer", key)
 	}
-	result := int(parsed)
 	return &result, nil
+}
+
+// exactJSONInteger consumes a JSON number already validated by the decoder.
+// Normalize its decimal scale before ParseInt, without rounding or constructing
+// a large power of ten for an out-of-range exponent.
+func exactJSONInteger(number json.Number) (int, error) {
+	mantissa := number.String()
+	exponentText := "0"
+	if index := strings.IndexAny(mantissa, "eE"); index >= 0 {
+		exponentText = mantissa[index+1:]
+		mantissa = mantissa[:index]
+	}
+	negative := strings.HasPrefix(mantissa, "-")
+	mantissa = strings.TrimPrefix(mantissa, "-")
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+	digits := strings.TrimLeft(whole+fraction, "0")
+	if digits == "" {
+		return 0, nil
+	}
+	exponent, err := strconv.ParseInt(exponentText, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	trimmed := strings.TrimRight(digits, "0")
+	scale := exponent - int64(len(fraction)) + int64(len(digits)-len(trimmed))
+	if scale < 0 {
+		return 0, strconv.ErrSyntax
+	}
+	if int64(len(trimmed))+scale > 19 {
+		return 0, strconv.ErrRange
+	}
+	digits = trimmed + strings.Repeat("0", int(scale))
+	if negative {
+		digits = "-" + digits
+	}
+	value, err := strconv.ParseInt(digits, 10, strconv.IntSize)
+	return int(value), err
 }
 
 func logMaxBytesFromArguments(raw json.RawMessage) int {
