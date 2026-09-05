@@ -68,14 +68,20 @@ type RunResult struct {
 
 // ListRequest filters the tasks returned by Service.List.
 type ListRequest struct {
-	Labels []string // OR semantics: a task matches if it has any of these labels
+	Labels      []string // OR semantics: a task matches if it has any of these labels
+	States      []string // OR semantics; empty matches all runtime states
+	Limit       int      // 0 means unbounded
+	Cursor      string   // opaque keyset cursor returned by a previous List call
+	NewestFirst bool     // false preserves the historical ascending-ID order
 }
 
-// ListResult is returned by Service.List. Tasks are sorted by ID (which,
-// given state.GenerateID's timestamp prefix, is also chronological), so
-// bulk consumers see a deterministic snapshot.
+// ListResult is returned by Service.List. Tasks are sorted by ID, ascending by
+// default or descending when ListRequest.NewestFirst is true. The cursor pages
+// through that deterministic ordering.
 type ListResult struct {
-	Tasks []Task
+	Tasks      []Task
+	Total      int
+	NextCursor string
 }
 
 // GetResult is returned by Service.Get.
@@ -139,6 +145,13 @@ type OperationResult struct {
 	// the task's state directory before the launch was confirmed. This is
 	// a successful terminal outcome, not a missing task.
 	AutoRemoved bool
+
+	// TaskID and Name identify the task as committed by metadata mutations.
+	// Labels is populated by SetLabels. These fields let adapters construct a
+	// reliable receipt without issuing a racy post-mutation Get.
+	TaskID string
+	Name   string
+	Labels []string
 }
 
 // RenameRequest renames a task.

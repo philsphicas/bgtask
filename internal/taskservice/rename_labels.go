@@ -51,7 +51,7 @@ func (s *Service) Rename(ctx context.Context, req RenameRequest) (*OperationResu
 	}
 
 	if meta.Name == req.NewName {
-		return &OperationResult{NoOp: true}, nil
+		return &OperationResult{NoOp: true, TaskID: id, Name: meta.Name, Labels: meta.Labels}, nil
 	}
 
 	if taken, err := s.Store.IsNameTaken(req.NewName); err != nil {
@@ -64,7 +64,7 @@ func (s *Service) Rename(ctx context.Context, req RenameRequest) (*OperationResu
 		return nil, Internal(op, req.Ref, id, err)
 	}
 
-	return &OperationResult{Changed: true}, nil
+	return &OperationResult{Changed: true, TaskID: id, Name: req.NewName, Labels: meta.Labels}, nil
 }
 
 // SetLabels replaces the labels on a task, enforcing label validation.
@@ -91,7 +91,8 @@ func (s *Service) SetLabels(ctx context.Context, req SetLabelsRequest) (*Operati
 	}
 	defer lease.Unlock()
 
-	if _, err := s.Store.ReadMeta(id); err != nil {
+	meta, err := s.Store.ReadMeta(id)
+	if err != nil {
 		return nil, NotFound(op, req.Ref, "task no longer exists")
 	}
 
@@ -99,5 +100,5 @@ func (s *Service) SetLabels(ctx context.Context, req SetLabelsRequest) (*Operati
 		return nil, Internal(op, req.Ref, id, err)
 	}
 
-	return &OperationResult{Changed: true}, nil
+	return &OperationResult{Changed: true, TaskID: id, Name: meta.Name, Labels: req.Labels}, nil
 }

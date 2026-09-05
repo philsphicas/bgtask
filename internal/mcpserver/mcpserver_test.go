@@ -3,13 +3,20 @@ package mcpserver_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/philsphicas/bgtask/internal/mcpserver"
+	"github.com/philsphicas/bgtask/internal/state"
+	"github.com/philsphicas/bgtask/internal/supervisor"
+	"github.com/philsphicas/bgtask/internal/taskservice"
 )
 
 // connectClient starts an MCP client and connects it to the Streamable
@@ -94,6 +101,12 @@ func TestDiscovery_ExactToolSet(t *testing.T) {
 		if strings.TrimSpace(tool.Description) == "" {
 			t.Errorf("tool %q has an empty description", tool.Name)
 		}
+		if tool.Annotations == nil || strings.TrimSpace(tool.Annotations.Title) == "" {
+			t.Errorf("tool %q has no annotation title", tool.Name)
+		}
+		if tool.Annotations.OpenWorldHint == nil {
+			t.Errorf("tool %q has no open-world annotation", tool.Name)
+		}
 	}
 }
 
@@ -109,6 +122,7 @@ func TestRunListGetLifecycle(t *testing.T) {
 	runOut, runRes := callTool[mcpserver.RunOutput](t, cs, "bgtask_run", mcpserver.RunInput{
 		Name:    "demo",
 		Command: []string{"sleep", "10"},
+		Cwd:     t.TempDir(),
 		Labels:  []string{"demo-label"},
 	})
 	if runRes.IsError {
@@ -120,8 +134,8 @@ func TestRunListGetLifecycle(t *testing.T) {
 	if runOut.PID == 0 {
 		t.Errorf("bgtask_run: PID = 0, want non-zero")
 	}
-	if runOut.Task.Status.State != "running" {
-		t.Errorf("bgtask_run: status.state = %q, want %q", runOut.Task.Status.State, "running")
+	if runOut.Task.State != "running" {
+		t.Errorf("bgtask_run: state = %q, want %q", runOut.Task.State, "running")
 	}
 
 	listOut, listRes := callTool[mcpserver.ListOutput](t, cs, "bgtask_list", mcpserver.ListInput{})
@@ -166,7 +180,7 @@ func TestRun_DuplicateNameIsStructuredConflict(t *testing.T) {
 	defer ts.Close()
 	cs := connectClient(t, ts.URL)
 
-	in := mcpserver.RunInput{Name: "dup", Command: []string{"sleep", "10"}}
+	in := mcpserver.RunInput{Name: "dup", Command: []string{"sleep", "10"}, Cwd: t.TempDir()}
 	if _, res := callTool[mcpserver.RunOutput](t, cs, "bgtask_run", in); res.IsError {
 		t.Fatalf("first bgtask_run unexpectedly failed")
 	}
@@ -191,17 +205,16 @@ func TestRun_DuplicateNameIsStructuredConflict(t *testing.T) {
 		t.Error("second bgtask_run: Error.Retryable = true, want false (a conflict is not transient)")
 	}
 
-	// The auto-generated text content must also carry the structured JSON
-	// (not just the error string), so a caller without structured-content
-	// support still gets machine-readable fields.
+	// Text-only clients receive a concise self-contained error rather than a
+	// second copy of the structured JSON.
 	found := false
 	for _, c := range res.Content {
-		if tc, ok := c.(*mcp.TextContent); ok && strings.Contains(tc.Text, `"code":"conflict"`) {
+		if tc, ok := c.(*mcp.TextContent); ok && strings.Contains(tc.Text, "conflict:") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected text content to include the structured error JSON; content = %+v", res.Content)
+		t.Errorf("expected concise conflict text; content = %+v", res.Content)
 	}
 }
 
@@ -218,6 +231,7 @@ func TestRun_RedactsEnvValues(t *testing.T) {
 	_, runRes := callTool[mcpserver.RunOutput](t, cs, "bgtask_run", mcpserver.RunInput{
 		Name:    "secretive",
 		Command: []string{"sleep", "10"},
+		Cwd:     t.TempDir(),
 		Env:     map[string]string{"API_TOKEN": secretValue},
 	})
 	if runRes.IsError {
@@ -265,7 +279,7 @@ func TestLogs_BoundedTailValidation(t *testing.T) {
 	cs := connectClient(t, ts.URL)
 
 	if _, res := callTool[mcpserver.RunOutput](t, cs, "bgtask_run", mcpserver.RunInput{
-		Name: "logged", Command: []string{"sleep", "10"},
+		Name: "logged", Command: []string{"sleep", "10"}, Cwd: t.TempDir(),
 	}); res.IsError {
 		t.Fatalf("bgtask_run unexpectedly failed")
 	}
@@ -276,18 +290,18 @@ func TestLogs_BoundedTailValidation(t *testing.T) {
 		t.Fatalf("bgtask_logs with default tail failed: %+v", defaultOut.Error)
 	}
 
-	tail := 5000
+	tail := 2000
 	if _, res := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", mcpserver.LogsInput{Ref: "logged", Tail: &tail}); res.IsError {
 		t.Errorf("bgtask_logs with tail = %d (the max) unexpectedly failed", tail)
 	}
 
-	tooMany := 5001
+	tooMany := 2001
 	tooManyOut, tooManyRes := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", mcpserver.LogsInput{Ref: "logged", Tail: &tooMany})
 	if !tooManyRes.IsError {
-		t.Fatal("bgtask_logs with tail = 5001: expected IsError = true")
+		t.Fatal("bgtask_logs with tail = 2001: expected IsError = true")
 	}
 	if tooManyOut.Error == nil || tooManyOut.Error.Code != "invalid_argument" {
-		t.Errorf("bgtask_logs with tail = 5001: Error = %+v, want Code = %q", tooManyOut.Error, "invalid_argument")
+		t.Errorf("bgtask_logs with tail = 2001: Error = %+v, want Code = %q", tooManyOut.Error, "invalid_argument")
 	}
 
 	negative := -1
@@ -304,8 +318,8 @@ func TestLogs_BoundedTailValidation(t *testing.T) {
 	if zeroRes.IsError {
 		t.Fatalf("bgtask_logs with tail = 0: unexpectedly failed: %+v", zeroOut.Error)
 	}
-	if len(zeroOut.Entries) != 0 {
-		t.Errorf("bgtask_logs with tail = 0: Entries = %v, want empty", zeroOut.Entries)
+	if zeroOut.Returned != 0 {
+		t.Errorf("bgtask_logs with tail = 0: Returned = %d, want zero", zeroOut.Returned)
 	}
 }
 
@@ -319,7 +333,7 @@ func TestLifecycle_SelectionMustBeExactlyOne(t *testing.T) {
 	cs := connectClient(t, ts.URL)
 
 	out, res := callTool[mcpserver.StopOutput](t, cs, "bgtask_stop", mcpserver.StopInput{
-		Selection: mcpserver.SelectionInput{Refs: []string{"a"}, All: true},
+		SelectionInput: mcpserver.SelectionInput{Refs: []string{"a"}, All: true},
 	})
 	if !res.IsError {
 		t.Fatal("bgtask_stop with refs+all both set: expected IsError = true")
@@ -346,13 +360,13 @@ func TestLifecycle_StopStartRestartRemoveCleanup(t *testing.T) {
 	cs := connectClient(t, ts.URL)
 
 	if _, res := callTool[mcpserver.RunOutput](t, cs, "bgtask_run", mcpserver.RunInput{
-		Name: "bulk", Command: []string{"sleep", "10"},
+		Name: "bulk", Command: []string{"sleep", "10"}, Cwd: t.TempDir(),
 	}); res.IsError {
 		t.Fatalf("bgtask_run unexpectedly failed")
 	}
 
 	stopOut, stopRes := callTool[mcpserver.StopOutput](t, cs, "bgtask_stop", mcpserver.StopInput{
-		Selection: mcpserver.SelectionInput{All: true},
+		SelectionInput: mcpserver.SelectionInput{All: true},
 	})
 	if stopRes.IsError {
 		t.Fatalf("bgtask_stop failed: %+v", stopOut.Error)
@@ -362,7 +376,7 @@ func TestLifecycle_StopStartRestartRemoveCleanup(t *testing.T) {
 	}
 
 	startOut, startRes := callTool[mcpserver.StartOutput](t, cs, "bgtask_start", mcpserver.StartInput{
-		Selection: mcpserver.SelectionInput{Refs: []string{"bulk"}},
+		SelectionInput: mcpserver.SelectionInput{Refs: []string{"bulk"}},
 	})
 	if startRes.IsError {
 		t.Fatalf("bgtask_start failed: %+v", startOut.Error)
@@ -372,7 +386,7 @@ func TestLifecycle_StopStartRestartRemoveCleanup(t *testing.T) {
 	}
 
 	restartOut, restartRes := callTool[mcpserver.RestartOutput](t, cs, "bgtask_restart", mcpserver.RestartInput{
-		Selection: mcpserver.SelectionInput{Labels: []string{"nonexistent-label"}},
+		SelectionInput: mcpserver.SelectionInput{Labels: []string{"nonexistent-label"}},
 	})
 	if restartRes.IsError {
 		t.Fatalf("bgtask_restart by label failed: %+v", restartOut.Error)
@@ -382,8 +396,8 @@ func TestLifecycle_StopStartRestartRemoveCleanup(t *testing.T) {
 	}
 
 	removeOut, removeRes := callTool[mcpserver.RemoveOutput](t, cs, "bgtask_remove", mcpserver.RemoveInput{
-		Selection: mcpserver.SelectionInput{All: true},
-		Force:     true,
+		SelectionInput: mcpserver.SelectionInput{All: true},
+		Force:          true,
 	})
 	if removeRes.IsError {
 		t.Fatalf("bgtask_remove failed: %+v", removeOut.Error)
@@ -410,7 +424,7 @@ func TestRenameAndSetLabels(t *testing.T) {
 	cs := connectClient(t, ts.URL)
 
 	if _, res := callTool[mcpserver.RunOutput](t, cs, "bgtask_run", mcpserver.RunInput{
-		Name: "old-name", Command: []string{"sleep", "10"}, Labels: []string{"keep-me"},
+		Name: "old-name", Command: []string{"sleep", "10"}, Cwd: t.TempDir(), Labels: []string{"keep-me"},
 	}); res.IsError {
 		t.Fatalf("bgtask_run unexpectedly failed")
 	}
@@ -421,8 +435,8 @@ func TestRenameAndSetLabels(t *testing.T) {
 	if renameRes.IsError {
 		t.Fatalf("bgtask_rename failed: %+v", renameOut.Error)
 	}
-	if renameOut.Task == nil || renameOut.Task.Name != "new-name" {
-		t.Fatalf("bgtask_rename: task = %+v, want name %q", renameOut.Task, "new-name")
+	if renameOut.Name != "new-name" {
+		t.Fatalf("bgtask_rename: name = %q, want %q", renameOut.Name, "new-name")
 	}
 
 	labelsOut, labelsRes := callTool[mcpserver.SetLabelsOutput](t, cs, "bgtask_set_labels", mcpserver.SetLabelsInput{
@@ -431,10 +445,303 @@ func TestRenameAndSetLabels(t *testing.T) {
 	if labelsRes.IsError {
 		t.Fatalf("bgtask_set_labels failed: %+v", labelsOut.Error)
 	}
-	if labelsOut.Task == nil {
-		t.Fatal("bgtask_set_labels: Task is nil")
+	if len(labelsOut.Labels) != 1 || labelsOut.Labels[0] != "replacement-label" {
+		t.Errorf("bgtask_set_labels: Labels = %v, want [replacement-label] (wholesale replace, not additive)", labelsOut.Labels)
 	}
-	if len(labelsOut.Task.Labels) != 1 || labelsOut.Task.Labels[0] != "replacement-label" {
-		t.Errorf("bgtask_set_labels: Labels = %v, want [replacement-label] (wholesale replace, not additive)", labelsOut.Task.Labels)
+}
+
+func TestList_IsBoundedCompactAndCursorPaged(t *testing.T) {
+	svc, _ := newTestService(t)
+	for i := 0; i < 45; i++ {
+		id := fmt.Sprintf("20260101T%06d-%08d", i, i)
+		err := svc.Store.Create(&state.Meta{
+			ID: id, Name: fmt.Sprintf("task-%02d", i),
+			Command: []string{"very-long-command", strings.Repeat("argument", 30)},
+			Cwd:     strings.Repeat("C:\\long\\path\\", 20), CreatedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+
+	first, firstRes := callTool[mcpserver.ListOutput](t, cs, "bgtask_list", mcpserver.ListInput{})
+	if firstRes.IsError {
+		t.Fatalf("list failed: %+v", first.Error)
+	}
+	if first.Returned != 20 || first.Total != 45 || first.NextCursor == "" {
+		t.Fatalf("first page = %+v, want 20 of 45 with cursor", first)
+	}
+	raw, err := json.Marshal(firstRes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > 16*1024 {
+		t.Fatalf("default list payload = %d bytes, want <= 16384", len(raw))
+	}
+	for _, forbidden := range []string{`"cwd"`, `"env_keys"`, `"restart_delay"`, `"log_path"`, `"supervisor_pid"`} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Errorf("compact list leaked full-detail field %s", forbidden)
+		}
+	}
+	if len(firstRes.Content) != 1 {
+		t.Fatalf("content blocks = %d, want 1", len(firstRes.Content))
+	}
+	if tc, ok := firstRes.Content[0].(*mcp.TextContent); !ok || strings.HasPrefix(strings.TrimSpace(tc.Text), "{") {
+		t.Fatalf("list text content is not a compact table: %#v", firstRes.Content[0])
+	}
+
+	second, secondRes := callTool[mcpserver.ListOutput](t, cs, "bgtask_list", mcpserver.ListInput{Cursor: first.NextCursor})
+	if secondRes.IsError || second.Returned != 20 || second.Total != 45 {
+		t.Fatalf("second page = %+v, error=%v", second, secondRes.IsError)
+	}
+	if first.Tasks[len(first.Tasks)-1].ID == second.Tasks[0].ID {
+		t.Fatal("cursor repeated the page boundary task")
+	}
+	text := firstRes.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, first.NextCursor) {
+		t.Fatal("text-only list response omitted the continuation cursor")
+	}
+}
+
+func TestList_RunningFilterAndInvalidLimit(t *testing.T) {
+	svc, _ := newTestService(t)
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+	if _, res := callTool[mcpserver.RunOutput](t, cs, "bgtask_run", mcpserver.RunInput{
+		Name: "running", Command: []string{"sleep", "10"}, Cwd: t.TempDir(),
+	}); res.IsError {
+		t.Fatal("run failed")
+	}
+	out, res := callTool[mcpserver.ListOutput](t, cs, "bgtask_list", mcpserver.ListInput{States: []string{"running"}})
+	if res.IsError || len(out.Tasks) != 1 || out.Tasks[0].State != "running" {
+		t.Fatalf("running list = %+v, error=%v", out, res.IsError)
+	}
+	tooMany := 101
+	bad, badRes := callTool[mcpserver.ListOutput](t, cs, "bgtask_list", mcpserver.ListInput{Limit: &tooMany})
+	if !badRes.IsError || bad.Error == nil || bad.Error.Code != "invalid_argument" {
+		t.Fatalf("invalid limit = %+v, error=%v", bad, badRes.IsError)
+	}
+}
+
+func TestGet_TextContainsFullTaskDetails(t *testing.T) {
+	svc, _ := newTestService(t)
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+	run, res := callTool[mcpserver.RunOutput](t, cs, "bgtask_run", mcpserver.RunInput{
+		Name: "details", Command: []string{"sleep", "10"}, Cwd: t.TempDir(),
+		Labels: []string{"review"}, Restart: "always", HealthCheck: "echo ok", HealthInterval: "5s",
+	})
+	if res.IsError {
+		t.Fatalf("run failed: %+v", run.Error)
+	}
+	_, getRes := callTool[mcpserver.GetOutput](t, cs, "bgtask_get", mcpserver.GetInput{Ref: run.Task.ID})
+	text := getRes.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"Command:", "Cwd:", `Labels: ["review"]`, "Restart: always", "Health check:", "Supervisor PID:", "Log path:"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("get text omitted %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestLogs_EnforcesByteAndEntryBounds(t *testing.T) {
+	svc, _ := newTestService(t)
+	run, err := svc.Run(context.Background(), taskservice.RunRequest{
+		Name: "logs-budget", Command: []string{"sleep", "10"}, Cwd: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []supervisor.LogEntry{
+		{Time: time.Now().Add(-time.Second), Stream: "o", Data: strings.Repeat("x", 5000)},
+		{Time: time.Now(), Stream: "e", Data: "recent failure\n"},
+	}
+	var lines strings.Builder
+	for _, entry := range entries {
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines.Write(raw)
+		lines.WriteByte('\n')
+	}
+	if err := os.WriteFile(svc.Store.OutputPath(run.Task.ID), []byte(lines.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+	maxBytes := 128
+	out, res := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", mcpserver.LogsInput{
+		Ref: run.Task.ID, MaxBytes: &maxBytes,
+	})
+	if res.IsError {
+		t.Fatalf("logs failed: %+v", out.Error)
+	}
+	if out.Returned != 1 || out.OmittedOlder != 1 || !out.ByteLimitReached || out.EntryTruncated {
+		t.Fatalf("bounded logs metadata = %+v", out)
+	}
+	tc, ok := res.Content[0].(*mcp.TextContent)
+	if !ok || !strings.Contains(tc.Text, "recent failure") || len(tc.Text) > maxBytes {
+		t.Fatalf("bounded log text = %#v", res.Content[0])
+	}
+
+	tiny := 1
+	tinyOut, tinyRes := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", mcpserver.LogsInput{
+		Ref: run.Task.ID, MaxBytes: &tiny,
+	})
+	if tinyRes.IsError || tinyOut.OmittedOlder != 2 {
+		t.Fatalf("tiny-budget logs = %+v, error=%v", tinyOut, tinyRes.IsError)
+	}
+	tinyText := tinyRes.Content[0].(*mcp.TextContent).Text
+	if len(tinyText) > tiny {
+		t.Fatalf("tiny-budget text = %q (%d bytes), want at most %d", tinyText, len(tinyText), tiny)
+	}
+}
+
+func TestLogs_ErrorTextHonorsValidMaxBytes(t *testing.T) {
+	svc, _ := newTestService(t)
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+	maxBytes := 2
+	out, res := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", mcpserver.LogsInput{
+		Ref: "missing", MaxBytes: &maxBytes,
+	})
+	if !res.IsError || out.Error == nil || out.Error.Code != "not_found" {
+		t.Fatalf("missing logs = %+v, error=%v", out, res.IsError)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if len(text) > maxBytes || !utf8.ValidString(text) {
+		t.Fatalf("error text = %q (%d bytes), max=%d", text, len(text), maxBytes)
+	}
+}
+
+func TestLogs_PreHandlerValidationHonorsValidMaxBytes(t *testing.T) {
+	svc, _ := newTestService(t)
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+
+	for name, arguments := range map[string]map[string]any{
+		"missing ref":           {"max_bytes": 2},
+		"wrong tail":            {"ref": "task", "tail": "many", "max_bytes": 2},
+		"unknown field":         {"ref": "task", "extra": true, "max_bytes": 2},
+		"case variant override": {"ref": "task", "max_bytes": 2, "MAX_BYTES": 131072},
+		"null ref":              {"ref": nil, "max_bytes": 2},
+		"null since":            {"ref": "task", "since": nil, "max_bytes": 2},
+		"null stream":           {"ref": "task", "stream": nil, "max_bytes": 2},
+		"null all":              {"ref": "task", "all": nil, "max_bytes": 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, res := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", arguments)
+			if !res.IsError || out.Error == nil || out.Error.Code != "invalid_argument" {
+				t.Fatalf("output = %+v, IsError=%v", out, res.IsError)
+			}
+			text := res.Content[0].(*mcp.TextContent).Text
+			if len(text) > 2 || !utf8.ValidString(text) {
+				t.Fatalf("text = %q (%d bytes)", text, len(text))
+			}
+		})
+	}
+
+	t.Run("integral decimal", func(t *testing.T) {
+		out, res := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", map[string]any{
+			"ref": "missing", "tail": 2.0, "max_bytes": 2.0,
+		})
+		if !res.IsError || out.Error == nil || out.Error.Code != "not_found" {
+			t.Fatalf("output = %+v, IsError=%v", out, res.IsError)
+		}
+		text := res.Content[0].(*mcp.TextContent).Text
+		if len(text) > 2 || !utf8.ValidString(text) {
+			t.Fatalf("text = %q (%d bytes)", text, len(text))
+		}
+	})
+}
+
+func TestLogs_RendersLifecycleDetails(t *testing.T) {
+	svc, _ := newTestService(t)
+	run, err := svc.Run(context.Background(), taskservice.RunRequest{
+		Name: "lifecycle-logs", Command: []string{"sleep", "10"}, Cwd: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, attempt := 17, 3
+	entry := supervisor.LogEntry{
+		Time: time.Now(), Stream: "x", Data: "restarting",
+		Code: &code, Attempt: &attempt, Delay: "5s", Message: "health check failed",
+	}
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(svc.Store.OutputPath(run.Task.ID), append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+	_, res := callTool[mcpserver.LogsOutput](t, cs, "bgtask_logs", mcpserver.LogsInput{Ref: run.Task.ID})
+	text := res.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"restarting", "code=17", "attempt=3", "delay=5s", "health check failed"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("lifecycle log text %q does not contain %q", text, want)
+		}
+	}
+}
+
+func TestBatchOutput_IsAggregatedAndBounded(t *testing.T) {
+	svc, _ := newTestService(t)
+	for i := 0; i < 55; i++ {
+		id := fmt.Sprintf("20260102T%06d-%08d", i, i)
+		if err := svc.Store.Create(&state.Meta{
+			ID: id, Name: fmt.Sprintf("cleanup-%02d", i),
+			Command: []string{"echo"}, Cwd: ".", CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+
+	out, res := callTool[mcpserver.CleanupOutput](t, cs, "bgtask_cleanup", mcpserver.CleanupInput{})
+	if res.IsError {
+		t.Fatalf("cleanup failed: %+v", out.Error)
+	}
+	if out.Counts.Targeted != 55 || out.Counts.Changed != 55 {
+		t.Fatalf("counts = %+v, want 55 targeted and changed", out.Counts)
+	}
+	if len(out.Items) != 50 || out.ItemsOmitted != 5 {
+		t.Fatalf("details = %d, omitted = %d; want 50 and 5", len(out.Items), out.ItemsOmitted)
+	}
+	for _, item := range out.Items {
+		if item.Name == "" || item.TaskID == "" {
+			t.Fatalf("compact receipt lacks identity: %+v", item)
+		}
+	}
+}
+
+func TestLifecycle_RejectsTooManyExplicitRefs(t *testing.T) {
+	svc, _ := newTestService(t)
+	ts := httptest.NewServer(mcpserver.NewHandler(svc, "test"))
+	defer ts.Close()
+	cs := connectClient(t, ts.URL)
+	refs := make([]string, 51)
+	for i := range refs {
+		refs[i] = fmt.Sprintf("task-%d", i)
+	}
+	out, res := callTool[mcpserver.StopOutput](t, cs, "bgtask_stop", mcpserver.StopInput{
+		SelectionInput: mcpserver.SelectionInput{Refs: refs},
+	})
+	if !res.IsError || out.Error == nil || out.Error.Code != "invalid_argument" {
+		t.Fatalf("too many refs = %+v, error=%v", out, res.IsError)
 	}
 }

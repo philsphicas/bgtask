@@ -1,12 +1,38 @@
 package mcpserver
 
 import (
+	"sort"
+	"strings"
 	"time"
+	"unicode"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/philsphicas/bgtask/internal/state"
-	"github.com/philsphicas/bgtask/internal/supervisor"
 	"github.com/philsphicas/bgtask/internal/taskservice"
 )
+
+const commandPreviewWidth = 120
+const taskNamePreviewWidth = 80
+const commandPreviewMaxBytes = 512
+const taskNamePreviewMaxBytes = 256
+const maxSummaryLabels = 10
+
+// TaskSummary is the compact projection used by collection and mutation
+// responses. Full configuration remains exclusive to TaskInfo/bgtask_get.
+type TaskSummary struct {
+	ID               string   `json:"id" jsonschema:"Canonical task ID."`
+	Name             string   `json:"name" jsonschema:"Task name."`
+	NameTruncated    bool     `json:"name_truncated,omitempty" jsonschema:"True when name is a shortened display value; use id as the canonical reference."`
+	State            string   `json:"state" jsonschema:"One of running, exited, dead, or unknown."`
+	Ports            []uint32 `json:"ports,omitempty" jsonschema:"Listening TCP ports, for a running task."`
+	Labels           []string `json:"labels,omitempty" jsonschema:"Labels attached to the task."`
+	LabelsTruncated  bool     `json:"labels_truncated,omitempty" jsonschema:"True when additional labels were omitted from this compact summary."`
+	CommandPreview   string   `json:"command_preview" jsonschema:"Display-only command preview; call bgtask_get for the exact argv."`
+	CommandTruncated bool     `json:"command_truncated,omitempty" jsonschema:"True when command_preview is shortened; call bgtask_get for exact argv."`
+	Since            string   `json:"since,omitempty" jsonschema:"Running since time, RFC3339."`
+	ExitCode         *int     `json:"exit_code,omitempty" jsonschema:"Process exit code, present for exited tasks, including zero."`
+	ExitedAt         string   `json:"exited_at,omitempty" jsonschema:"Exit time, RFC3339."`
+}
 
 // TaskInfo is the MCP wire-format projection of a task. Like
 // server.TaskJSON, it is built from taskservice.PublicTask (never from
@@ -60,33 +86,29 @@ type DeadInfo struct {
 	Message string `json:"message" jsonschema:"Human-readable explanation of why the task is considered dead."`
 }
 
-// LogEntryInfo mirrors supervisor.LogEntry, with its timestamp rendered as
-// an RFC3339 string.
-type LogEntryInfo struct {
-	Time    string `json:"time" jsonschema:"Entry timestamp, RFC3339."`
-	Stream  string `json:"stream" jsonschema:"\"o\" (stdout), \"e\" (stderr), or \"x\" (a supervisor lifecycle event, e.g. restart/health-check)."`
-	Data    string `json:"data" jsonschema:"The output text (for \"o\"/\"e\") or a short event description (for \"x\")."`
-	Code    *int   `json:"code,omitempty" jsonschema:"Process exit code, present on lifecycle exit entries."`
-	Attempt *int   `json:"attempt,omitempty" jsonschema:"Restart attempt number, present on lifecycle restart entries."`
-	Delay   string `json:"delay,omitempty" jsonschema:"Delay before the next restart attempt, as a Go duration string."`
-	Message string `json:"message,omitempty" jsonschema:"Additional detail, e.g. health check output or an error description."`
-}
-
 // BatchItemInfo is the per-task outcome within a bulk lifecycle operation
 // (start, stop, restart, remove, cleanup), mirroring server.BatchItemJSON.
 // Error is set only when this item failed; a best-effort batch (labels or
 // all selection) never fails as a whole over one item's error.
 type BatchItemInfo struct {
-	Ref         string     `json:"ref" jsonschema:"The name, ID, or task ID exactly as it was processed."`
-	TaskID      string     `json:"task_id,omitempty" jsonschema:"Canonical resolved task ID, if resolution succeeded."`
-	Task        *TaskInfo  `json:"task,omitempty" jsonschema:"The task as last observed during this operation, if available."`
-	Changed     bool       `json:"changed" jsonschema:"True if this operation performed a state change on the task."`
-	NoOp        bool       `json:"no_op,omitempty" jsonschema:"True if the task was already in the requested state and nothing needed to change (not an error)."`
-	Forced      bool       `json:"forced,omitempty" jsonschema:"True if a forceful path was taken (an explicit force request, or escalation to SIGKILL after a graceful timeout)."`
-	PID         int        `json:"pid,omitempty" jsonschema:"New process ID, for operations that launch a process."`
+	Ref         string     `json:"ref" jsonschema:"The task reference exactly as processed."`
+	TaskID      string     `json:"task_id,omitempty" jsonschema:"Canonical task ID, if resolved."`
+	Name        string     `json:"name,omitempty" jsonschema:"Task name, if resolved."`
+	State       string     `json:"state,omitempty" jsonschema:"Task state observed during the operation."`
+	Changed     bool       `json:"changed" jsonschema:"True if the operation changed the task."`
+	NoOp        bool       `json:"no_op,omitempty" jsonschema:"True if nothing needed to change."`
+	Forced      bool       `json:"forced,omitempty" jsonschema:"True if a forceful process path was used."`
+	PID         int        `json:"pid,omitempty" jsonschema:"New supervisor PID for launch operations."`
 	NoBreakaway bool       `json:"no_breakaway,omitempty" jsonschema:"True if a launched supervisor could not detach from a Windows job object."`
-	AutoRemoved bool       `json:"auto_removed,omitempty" jsonschema:"True if this was an --rm task whose command finished so quickly its state was already removed."`
-	Error       *ToolError `json:"error,omitempty" jsonschema:"Set only when this specific item failed."`
+	AutoRemoved bool       `json:"auto_removed,omitempty" jsonschema:"True if an auto-remove task already removed its state."`
+	Error       *ToolError `json:"error,omitempty" jsonschema:"Set only when this item failed."`
+}
+
+type BatchCounts struct {
+	Targeted int `json:"targeted"`
+	Changed  int `json:"changed"`
+	NoOp     int `json:"no_op"`
+	Failed   int `json:"failed"`
 }
 
 // durationString renders d unambiguously for the wire: empty ("") for
@@ -135,6 +157,72 @@ func toTaskInfo(pt taskservice.PublicTask) TaskInfo {
 	}
 }
 
+func toTaskSummary(pt taskservice.PublicTask) TaskSummary {
+	name := sanitizeControls(pt.Name)
+	compactName, nameTruncated := truncateCompact(name, taskNamePreviewWidth, taskNamePreviewMaxBytes)
+	command := sanitizeControls(strings.Join(pt.Command, " "))
+	commandPreview, commandTruncated := truncateCompact(command, commandPreviewWidth, commandPreviewMaxBytes)
+	labels := pt.Labels
+	labelsTruncated := len(labels) > maxSummaryLabels
+	if labelsTruncated {
+		labels = labels[:maxSummaryLabels]
+	}
+	if len(labels) > 0 {
+		safeLabels := make([]string, len(labels))
+		for i, label := range labels {
+			safeLabels[i] = sanitizeControls(label)
+		}
+		labels = safeLabels
+	}
+	summary := TaskSummary{
+		ID:               pt.ID,
+		Name:             compactName,
+		NameTruncated:    nameTruncated,
+		State:            pt.Status.State,
+		Labels:           labels,
+		LabelsTruncated:  labelsTruncated,
+		CommandPreview:   commandPreview,
+		CommandTruncated: commandTruncated,
+	}
+	if pt.Status.Running != nil {
+		summary.Ports = pt.Status.Running.Ports
+		if pt.Status.Running.Since != nil {
+			summary.Since = timeString(*pt.Status.Running.Since)
+		}
+	}
+	if pt.Status.Exited != nil {
+		code := pt.Status.Exited.Code
+		summary.ExitCode = &code
+		summary.ExitedAt = timeString(pt.Status.Exited.At)
+	}
+	return summary
+}
+
+func truncateCompact(value string, maxWidth, maxBytes int) (string, bool) {
+	compact := truncateDisplay(value, maxWidth)
+	if len(compact) > maxBytes {
+		compact, _ = truncateUTF8Bytes(compact, maxBytes)
+		compact = truncateDisplay(compact, maxWidth)
+	}
+	return compact, compact != value
+}
+
+func sanitizeControls(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return ' '
+		}
+		return r
+	}, value)
+}
+
+func truncateDisplay(value string, maxWidth int) string {
+	if maxWidth <= 0 || runewidth.StringWidth(value) <= maxWidth {
+		return value
+	}
+	return runewidth.Truncate(value, maxWidth, "…")
+}
+
 func toStatusInfo(ts state.TaskStatus) StatusInfo {
 	out := StatusInfo{State: ts.State}
 	if ts.Running != nil {
@@ -160,18 +248,6 @@ func toStatusInfo(ts state.TaskStatus) StatusInfo {
 	return out
 }
 
-func toLogEntryInfo(e supervisor.LogEntry) LogEntryInfo {
-	return LogEntryInfo{
-		Time:    timeString(e.Time),
-		Stream:  e.Stream,
-		Data:    e.Data,
-		Code:    e.Code,
-		Attempt: e.Attempt,
-		Delay:   e.Delay,
-		Message: e.Message,
-	}
-}
-
 func toBatchItemInfo(item taskservice.BatchItem) BatchItemInfo {
 	out := BatchItemInfo{
 		Ref:         item.Ref,
@@ -184,8 +260,8 @@ func toBatchItemInfo(item taskservice.BatchItem) BatchItemInfo {
 		AutoRemoved: item.Result.AutoRemoved,
 	}
 	if item.Task != nil {
-		ti := toTaskInfo(item.Task.Public())
-		out.Task = &ti
+		out.Name = item.Task.Meta.Name
+		out.State = item.Task.Status.State
 	}
 	if item.Err != nil {
 		out.Error = toToolError(item.Err)
@@ -206,16 +282,44 @@ func toBatchItemInfo(item taskservice.BatchItem) BatchItemInfo {
 //   - result != nil && err == nil: a best-effort (labels/all) selection,
 //     or an explicit selection that fully succeeded. Per-item errors (if
 //     any) are carried on the items themselves, not as a call failure.
-func batchOutcome(result *taskservice.BatchResult, err error) (items []BatchItemInfo, failed bool, toolErr *ToolError) {
+func batchOutcome(result *taskservice.BatchResult, err error) (items []BatchItemInfo, counts BatchCounts, omitted int, failed bool, toolErr *ToolError) {
 	if result == nil {
-		return nil, true, toToolError(err)
+		return nil, counts, 0, true, toToolError(err)
 	}
 	items = make([]BatchItemInfo, 0, len(result.Items))
 	for _, item := range result.Items {
-		items = append(items, toBatchItemInfo(item))
+		info := toBatchItemInfo(item)
+		counts.Targeted++
+		switch {
+		case info.Error != nil:
+			counts.Failed++
+		case info.Changed:
+			counts.Changed++
+		case info.NoOp:
+			counts.NoOp++
+		}
+		items = append(items, info)
+	}
+	if len(items) > maxBatchItems {
+		sort.SliceStable(items, func(i, j int) bool {
+			return batchItemPriority(items[i]) < batchItemPriority(items[j])
+		})
+		omitted = len(items) - maxBatchItems
+		items = items[:maxBatchItems]
 	}
 	if err != nil {
-		return items, true, toToolError(err)
+		return items, counts, omitted, true, toToolError(err)
 	}
-	return items, false, nil
+	return items, counts, omitted, false, nil
+}
+
+func batchItemPriority(item BatchItemInfo) int {
+	switch {
+	case item.Error != nil:
+		return 0
+	case item.Changed || item.Forced:
+		return 1
+	default:
+		return 2
+	}
 }

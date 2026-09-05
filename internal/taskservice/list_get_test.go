@@ -142,3 +142,78 @@ func TestGet_ResolvesUnknownStatus(t *testing.T) {
 		t.Errorf("State = %q, want unknown", got.Task.Status.State)
 	}
 }
+
+func TestList_FiltersStatesAndPaginatesNewestFirst(t *testing.T) {
+	svc, _ := newTestService(t)
+	for _, id := range []string{
+		"20260101T000001-00000001",
+		"20260101T000002-00000002",
+		"20260101T000003-00000003",
+	} {
+		if err := svc.Store.Create(&state.Meta{ID: id, Name: id, Command: []string{"echo", id}, Cwd: ".", CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, err := svc.List(context.Background(), taskservice.ListRequest{
+		States: []string{"unknown"}, Limit: 2, NewestFirst: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Total != 3 || len(first.Tasks) != 2 || first.NextCursor == "" {
+		t.Fatalf("first page = %+v, want total 3, 2 tasks, and cursor", first)
+	}
+	if cap(first.Tasks) > 2 {
+		t.Fatalf("first page retained capacity %d, want at most the page limit", cap(first.Tasks))
+	}
+	if first.Tasks[0].ID != "20260101T000003-00000003" {
+		t.Fatalf("first task = %s, want newest ID", first.Tasks[0].ID)
+	}
+
+	second, err := svc.List(context.Background(), taskservice.ListRequest{
+		States: []string{"unknown"}, Limit: 2, NewestFirst: true, Cursor: first.NextCursor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Total != 3 || len(second.Tasks) != 1 || second.NextCursor != "" {
+		t.Fatalf("second page = %+v, want total 3, 1 task, no cursor", second)
+	}
+	if second.Tasks[0].ID != "20260101T000001-00000001" {
+		t.Fatalf("second-page task = %s, want oldest ID", second.Tasks[0].ID)
+	}
+}
+
+func TestList_RejectsInvalidStateAndCursor(t *testing.T) {
+	svc, _ := newTestService(t)
+	if _, err := svc.List(context.Background(), taskservice.ListRequest{States: []string{"RUNNING"}}); !taskservice.IsInvalidArgument(err) {
+		t.Fatalf("invalid state error = %v, want invalid_argument", err)
+	}
+	if _, err := svc.List(context.Background(), taskservice.ListRequest{Cursor: "not-a-cursor"}); !taskservice.IsInvalidArgument(err) {
+		t.Fatalf("invalid cursor error = %v, want invalid_argument", err)
+	}
+}
+
+func TestList_OnlyScansPortsForReturnedPage(t *testing.T) {
+	svc, env := newTestService(t)
+	for _, name := range []string{"one", "two", "three"} {
+		created := mustRun(t, svc, name, []string{"sleep", "100"})
+		childPID := created.PID + 1000
+		if err := svc.Store.WritePID(created.Task.ID, "child.pid", childPID); err != nil {
+			t.Fatal(err)
+		}
+		env.ports[childPID] = []uint32{8080}
+	}
+	before := env.portCallCount()
+	result, err := svc.List(context.Background(), taskservice.ListRequest{States: []string{"running"}, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Tasks) != 1 {
+		t.Fatalf("tasks = %d, want 1", len(result.Tasks))
+	}
+	if got := env.portCallCount() - before; got != 1 {
+		t.Fatalf("ListeningPorts calls = %d, want 1", got)
+	}
+}
