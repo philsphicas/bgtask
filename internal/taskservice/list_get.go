@@ -42,6 +42,7 @@ func (s *Service) List(ctx context.Context, req ListRequest) (*ListResult, error
 			return nil, InvalidArgument(op, "", "", fmt.Sprintf("invalid state %q (expected running, exited, dead, or unknown)", taskState))
 		}
 	}
+	filterByState := len(stateFilter) > 0 && len(stateFilter) < 4
 	cursor, err := decodeListCursor(req.Cursor)
 	if err != nil {
 		return nil, InvalidArgument(op, "", "", err.Error())
@@ -79,13 +80,14 @@ func (s *Service) List(ctx context.Context, req ListRequest) (*ListResult, error
 			continue
 		}
 		task := Task{
-			ID:      id,
-			Meta:    meta,
-			Status:  s.resolveStatusWithPorts(id, false),
-			LogPath: s.Store.OutputPath(id),
+			ID:   id,
+			Meta: meta,
 		}
-		if len(stateFilter) > 0 && !stateFilter[task.Status.State] {
-			continue
+		if filterByState {
+			task.Status = s.resolveStatusWithPorts(id, false)
+			if !stateFilter[task.Status.State] {
+				continue
+			}
 		}
 		total++
 		if cursor != nil {
@@ -110,6 +112,10 @@ func (s *Service) List(ctx context.Context, req ListRequest) (*ListResult, error
 		}
 	}
 	for i := range tasks {
+		if !filterByState {
+			tasks[i].Status = s.resolveStatusWithPorts(tasks[i].ID, false)
+		}
+		tasks[i].LogPath = s.Store.OutputPath(tasks[i].ID)
 		if tasks[i].Status.Running != nil && tasks[i].Status.Running.ChildPID > 0 {
 			tasks[i].Status.Running.Ports = s.Process.ListeningPorts(tasks[i].Status.Running.ChildPID)
 		}
