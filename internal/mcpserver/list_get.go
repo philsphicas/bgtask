@@ -151,7 +151,7 @@ func renderTaskInfo(task TaskInfo) string {
 	if task.Status.Exited != nil {
 		fmt.Fprintf(&b, "\nExit code: %d", task.Status.Exited.Code)
 		if task.Status.Exited.Signal != "" {
-			fmt.Fprintf(&b, "\nSignal: %s", task.Status.Exited.Signal)
+			fmt.Fprintf(&b, "\nSignal: %q", task.Status.Exited.Signal)
 		}
 		if task.Status.Exited.At != "" {
 			fmt.Fprintf(&b, "\nExited at: %s", task.Status.Exited.At)

@@ -209,7 +209,7 @@ func truncateCompact(value string, maxWidth, maxBytes int) (string, bool) {
 
 func sanitizeControls(value string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
 			return ' '
 		}
 		return r

@@ -129,6 +129,11 @@ The response includes `returned`, the total number matching the filters, and
 { "states": ["running"], "limit": 20, "cursor": "<next_cursor>" }
 ```
 
+Cursors are tied to the selected filters and ordering. Changing either requires
+a fresh request without a cursor; reordered or duplicated filter values are
+equivalent. Cursors do not freeze runtime state across calls. After a server
+upgrade rejects an older cursor, restart from the first page.
+
 Use `bgtask_get` on one returned name or ID for exact argv, cwd, environment
 key names, restart/health configuration, PIDs, ports, timestamps, and log path.
 Labels use OR semantics; when both labels and states are supplied, a task must

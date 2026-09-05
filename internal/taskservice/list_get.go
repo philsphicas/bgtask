@@ -5,19 +5,24 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 )
 
-const listCursorVersion = 1
+const listCursorVersion = 2
 
 type listCursor struct {
-	Version     int    `json:"v"`
-	LastID      string `json:"last_id"`
-	NewestFirst bool   `json:"newest_first"`
+	Version     int      `json:"v"`
+	LastID      string   `json:"last_id"`
+	NewestFirst bool     `json:"newest_first"`
+	Labels      []string `json:"labels"`
+	States      []string `json:"states"`
 }
 
-// List returns tasks matching req.Labels (OR semantics; empty means all),
-// sorted by ID (chronological, given state.GenerateID's timestamp prefix).
+// List returns tasks matching both req.Labels and req.States (OR within each
+// filter; empty means all), ordered by ascending ID unless NewestFirst is set.
+// Limit and Cursor select a page; Total counts all matches before pagination.
+// Cursors are bound to the filters and ordering, not to a frozen snapshot.
 // A task whose meta.json cannot be read is silently skipped, matching the
 // historical CLI behavior.
 func (s *Service) List(ctx context.Context, req ListRequest) (*ListResult, error) {
@@ -44,6 +49,14 @@ func (s *Service) List(ctx context.Context, req ListRequest) (*ListResult, error
 	if cursor != nil && cursor.NewestFirst != req.NewestFirst {
 		return nil, InvalidArgument(op, "", "", "cursor ordering does not match this request")
 	}
+	labels := normalizedListFilter(req.Labels)
+	states := normalizedListFilter(req.States)
+	if len(states) == 0 {
+		states = []string{"dead", "exited", "running", "unknown"}
+	}
+	if cursor != nil && (!slices.Equal(cursor.Labels, labels) || !slices.Equal(cursor.States, states)) {
+		return nil, InvalidArgument(op, "", "", "cursor filters do not match this request")
+	}
 
 	ids, err := s.snapshotIDs(op, Selection{Labels: req.Labels, All: len(req.Labels) == 0})
 	if err != nil {
@@ -68,7 +81,7 @@ func (s *Service) List(ctx context.Context, req ListRequest) (*ListResult, error
 		task := Task{
 			ID:      id,
 			Meta:    meta,
-			Status:  s.resolveStatusWithPorts(id, req.Limit == 0),
+			Status:  s.resolveStatusWithPorts(id, false),
 			LogPath: s.Store.OutputPath(id),
 		}
 		if len(stateFilter) > 0 && !stateFilter[task.Status.State] {
@@ -91,23 +104,27 @@ func (s *Service) List(ctx context.Context, req ListRequest) (*ListResult, error
 	}
 	nextCursor := ""
 	if hasMore {
-		nextCursor, err = encodeListCursor(tasks[len(tasks)-1].ID, req.NewestFirst)
+		nextCursor, err = encodeListCursor(tasks[len(tasks)-1].ID, req.NewestFirst, labels, states)
 		if err != nil {
 			return nil, Internal(op, "", "", err)
 		}
 	}
-	if req.Limit > 0 {
-		for i := range tasks {
-			if tasks[i].Status.Running != nil && tasks[i].Status.Running.ChildPID > 0 {
-				tasks[i].Status.Running.Ports = s.Process.ListeningPorts(tasks[i].Status.Running.ChildPID)
-			}
+	for i := range tasks {
+		if tasks[i].Status.Running != nil && tasks[i].Status.Running.ChildPID > 0 {
+			tasks[i].Status.Running.Ports = s.Process.ListeningPorts(tasks[i].Status.Running.ChildPID)
 		}
 	}
 	return &ListResult{Tasks: tasks, Total: total, NextCursor: nextCursor}, nil
 }
 
-func encodeListCursor(lastID string, newestFirst bool) (string, error) {
-	raw, err := json.Marshal(listCursor{Version: listCursorVersion, LastID: lastID, NewestFirst: newestFirst})
+func normalizedListFilter(values []string) []string {
+	normalized := slices.Clone(values)
+	slices.Sort(normalized)
+	return slices.Compact(normalized)
+}
+
+func encodeListCursor(lastID string, newestFirst bool, labels, states []string) (string, error) {
+	raw, err := json.Marshal(listCursor{Version: listCursorVersion, LastID: lastID, NewestFirst: newestFirst, Labels: labels, States: states})
 	if err != nil {
 		return "", err
 	}
