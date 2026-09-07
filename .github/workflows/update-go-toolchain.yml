@@ -4,53 +4,59 @@ on:
   schedule:
     - cron: "0 10 * * 1"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview the update without creating or modifying pull requests
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: update-go-toolchain
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
+    env:
+      # Discover the installed stable release, not a toolchain selected by go.mod.
+      GOTOOLCHAIN: local
     steps:
+      - name: Select run mode
+        id: mode
+        env:
+          PUBLISH: ${{ github.event_name == 'schedule' || !inputs.dry_run }}
+          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [[ "$PUBLISH" == true && "$GITHUB_REF" != "$DEFAULT_REF" ]]; then
+            echo "::error::Publishing is only allowed from the default branch. Use dry_run=true to test another branch."
+            exit 1
+          fi
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
         with:
           go-version: stable
+          check-latest: true
+          cache: false
+
+      - name: Test updater
+        run: |
+          bash .github/scripts/test-update-go-toolchain.sh
+          node --test .github/scripts/test-workflow-policy.cjs
 
       - name: Determine Go update
         id: version
         shell: bash
-        run: |
-          set -euo pipefail
-
-          current="$(go mod edit -json | jq -r '.Toolchain // ("go" + .Go)')"
-          current="${current#go}"
-          latest="$(go env GOVERSION)"
-          latest="${latest#go}"
-
-          if [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" != "$latest" ] ||
-             [ "$current" = "$latest" ]; then
-            echo "update-available=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          IFS=. read -r current_major current_minor _ <<< "$current"
-          IFS=. read -r latest_major latest_minor _ <<< "$latest"
-          if [ "$current_major" = "$latest_major" ] &&
-             [ "$current_minor" = "$latest_minor" ]; then
-            echo "is-patch=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is-patch=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          echo "current=$current" >> "$GITHUB_OUTPUT"
-          echo "latest=$latest" >> "$GITHUB_OUTPUT"
-          echo "language=$latest_major.$latest_minor.0" >> "$GITHUB_OUTPUT"
-          echo "update-available=true" >> "$GITHUB_OUTPUT"
+        run: bash .github/scripts/update-go-toolchain.sh check >> "$GITHUB_OUTPUT"
 
       - name: Require PR token
-        if: steps.version.outputs.update-available == 'true'
+        if: steps.version.outputs.update-available == 'true' && steps.mode.outputs.publish == 'true'
         env:
           TOKEN: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
         run: |
@@ -61,25 +67,72 @@ jobs:
 
       - name: Update module metadata
         if: steps.version.outputs.update-available == 'true'
+        env:
+          LATEST: ${{ steps.version.outputs.latest }}
+        run: bash .github/scripts/update-go-toolchain.sh update "$LATEST"
+
+      - name: Test updated module
+        if: steps.version.outputs.update-available == 'true'
+        run: go test -count=1 ./...
+
+      - name: Preview update
+        env:
+          PUBLISH: ${{ steps.mode.outputs.publish }}
         run: |
-          go mod edit \
-            -go="${{ steps.version.outputs.language }}" \
-            -toolchain="go${{ steps.version.outputs.latest }}"
-          go mod tidy -go="${{ steps.version.outputs.language }}"
+          set -euo pipefail
+          git diff --check
+          git diff -- go.mod go.sum > "$RUNNER_TEMP/go-toolchain-update.patch"
+          {
+            echo "## Go toolchain update"
+            echo
+            echo "Publishing enabled: $PUBLISH"
+            echo
+            if [[ -s "$RUNNER_TEMP/go-toolchain-update.patch" ]]; then
+              echo '```diff'
+              cat "$RUNNER_TEMP/go-toolchain-update.patch"
+              echo '```'
+            else
+              echo "No update needed."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload update preview
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-toolchain-update
+          path: ${{ runner.temp }}/go-toolchain-update.patch
+          if-no-files-found: error
+
+      - name: Disable existing auto-merge before a feature update
+        if: steps.version.outputs.is-patch == 'false' && steps.mode.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          number="$(gh pr list --base "$BASE" --head automation/go-toolchain --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "$number" ]]; then
+            gh pr merge --disable-auto "$number"
+          fi
 
       - name: Create pull request
         id: pull-request
-        if: steps.version.outputs.update-available == 'true'
+        if: steps.version.outputs.update-available == 'true' && steps.mode.outputs.publish == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
+          base: ${{ github.event.repository.default_branch }}
           branch: automation/go-toolchain
           delete-branch: true
           commit-message: "build: update Go toolchain to ${{ steps.version.outputs.latest }}"
           title: "build: update Go toolchain to ${{ steps.version.outputs.latest }}"
           body: |
-            Updates the `go` language baseline to Go ${{ steps.version.outputs.language }},
-            prefers toolchain Go ${{ steps.version.outputs.latest }}, and runs `go mod tidy`.
+            Updates the minimum Go version from ${{ steps.version.outputs.current }} to
+            ${{ steps.version.outputs.latest }}, removes the separate `toolchain` directive,
+            and runs `go mod tidy` with that exact Go release.
+
+            CI, demos, and release builds use `go-version-file: go.mod`, so they follow
+            this update without separate workflow version edits.
 
             Patch-level Go updates are eligible for auto-merge after required checks pass. Feature releases require review.
           add-paths: |
@@ -88,9 +141,12 @@ jobs:
 
       - name: Enable auto-merge for patch updates
         if: >
+          steps.mode.outputs.publish == 'true' &&
           steps.version.outputs.is-patch == 'true' &&
-          (steps.pull-request.outputs.pull-request-operation == 'created' ||
-           steps.pull-request.outputs.pull-request-operation == 'updated')
+          steps.pull-request.outputs.pull-request-number != '' &&
+          steps.pull-request.outputs.pull-request-operation != 'closed'
         env:
           GH_TOKEN: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
-        run: gh pr merge --auto --squash "${{ steps.pull-request.outputs.pull-request-number }}"
+          PR_NUMBER: ${{ steps.pull-request.outputs.pull-request-number }}
+          HEAD_SHA: ${{ steps.pull-request.outputs.pull-request-head-sha }}
+        run: gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_NUMBER"

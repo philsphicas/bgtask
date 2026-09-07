@@ -49,6 +49,31 @@ cd bgtask
 make build    # output: bin/bgtask
 ```
 
+The `go` directive in `go.mod` specifies the minimum Go version, including the
+patch release. CI, demo generation, and release builds install that same version
+with `go-version-file: go.mod`; there is no separate preferred `toolchain` version.
+
+The **Update Go Toolchain** workflow checks the latest stable Go release weekly
+or on manual dispatch. It uses `go get go@VERSION toolchain@none` to update
+`go.mod`, runs `go mod tidy`, and opens or
+refreshes the `automation/go-toolchain` PR. Patch updates are eligible for
+auto-merge after required checks pass; feature releases require review. Maintainers
+must configure `GO_TOOLCHAIN_UPDATER_TOKEN` with Contents and Pull requests
+read/write permissions so generated PRs trigger CI.
+
+Manual runs default to a dry run: they use the selected branch, update and test
+the module, and publish a diff in the run summary and artifacts without changing
+any PRs. Push an updater branch and run
+`gh workflow run update-go-toolchain.yml --ref BRANCH -f dry_run=true`
+to exercise it before merging. Scheduled runs publish automatically; to refresh
+an update PR manually after merging, dispatch on `main` with `dry_run=false`.
+Publishing from other branches is rejected.
+
+Dependabot separately updates Go module dependencies and GitHub Actions versions
+daily. Its auto-merge policy requires review whenever a dependency PR also changes
+the `go` or `toolchain` directives, even for a library patch update. This keeps
+dependency updates from bypassing the Go-version review policy.
+
 ## Quick start
 
 ```sh

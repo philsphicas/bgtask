@@ -20,7 +20,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Build
         run: make build
@@ -35,7 +35,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Test
         run: make test
@@ -66,7 +66,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
@@ -80,7 +80,22 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: govulncheck
         run: make vulncheck
+
+  go-updater:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Test Go updater
+        run: bash .github/scripts/test-update-go-toolchain.sh
+
+      - name: Test workflow policies
+        run: node --test .github/scripts/test-workflow-policy.cjs
