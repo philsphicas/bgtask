@@ -128,8 +128,9 @@ jobs:
           title: "build: update Go toolchain to ${{ steps.version.outputs.latest }}"
           body: |
             Updates the minimum Go version from ${{ steps.version.outputs.current }} to
-            ${{ steps.version.outputs.latest }}, removes the separate `toolchain` directive,
-            and runs `go mod tidy` with that exact Go release.
+            ${{ steps.version.outputs.latest }} and runs `go mod tidy` with that exact Go release.
+
+            The resulting module has no separate `toolchain` directive.
 
             CI, demos, and release builds use `go-version-file: go.mod`, so they follow
             this update without separate workflow version edits.
