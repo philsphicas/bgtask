@@ -15,9 +15,10 @@ validate_version() {
 
 case "${1:-}" in
   check)
-    # Read metadata without invoking Go: the module may require a newer compiler.
+    # Parse module directives with awk; go mod edit may require a newer compiler.
     current="$(awk '$1 == "go" { print $2 }' go.mod)"
     toolchain="$(awk '$1 == "toolchain" { print $2 }' go.mod)"
+    # GOTOOLCHAIN=local reports the installed compiler, not the module's preference.
     latest="$(go env GOVERSION)"
     latest="${latest#go}"
     validate_version "$current"

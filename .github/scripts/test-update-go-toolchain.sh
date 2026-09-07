@@ -107,3 +107,8 @@ fi
 result="$(bash "$script_dir/update-go-toolchain.sh" check)"
 [[ "$result" == "update-available=false" ]]
 echo "PASS: real module update is normalized and idempotent"
+
+printf 'module example.com/test\n\ngo 99.0.0\n' > go.mod
+result="$(bash "$script_dir/update-go-toolchain.sh" check)"
+[[ "$result" == "update-available=false" ]]
+echo "PASS: real compiler discovery works with a newer module requirement"
