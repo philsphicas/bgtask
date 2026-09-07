@@ -7,9 +7,13 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   dependabot-auto-merge:
-    if: github.actor == 'dependabot[bot]'
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Fetch metadata
@@ -18,12 +22,70 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Require review for Go version metadata changes
+        id: go-policy
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { data: current } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: pr.number
+            });
+            if (current.state !== "open" || current.head.sha !== pr.head.sha ||
+                current.base.sha !== pr.base.sha) {
+              core.setOutput("unchanged", "false");
+              core.notice("Skipping a stale pull request event.");
+              return;
+            }
+            const readVersion = async (ref) => {
+              const { data } = await github.rest.repos.getContent({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                path: "go.mod",
+                ref
+              });
+              if (Array.isArray(data) || data.type !== "file" || data.encoding !== "base64") {
+                throw new Error("Expected go.mod file content");
+              }
+              const content = Buffer.from(data.content, "base64").toString("utf8");
+              const directives = content.split(/\r?\n/)
+                .filter(line => /^\s*(go|toolchain)\s+/.test(line))
+                .map(line => line.replace(/\/\/.*$/, "").trim().replace(/\s+/g, " "));
+              if (!directives.some(line => /^go \d+\.\d+(?:\.\d+)?$/.test(line))) {
+                throw new Error("Missing or invalid Go version in go.mod");
+              }
+              return directives.join("\n");
+            };
+            const base = await readVersion(pr.base.sha);
+            const head = await readVersion(pr.head.sha);
+            const unchanged = base === head;
+            core.setOutput("unchanged", String(unchanged));
+            if (!unchanged) {
+              core.notice("Go version metadata changed; this dependency update requires review.");
+              const { repository } = await github.graphql(`
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) { id autoMergeRequest { enabledAt } }
+                  }
+                }`, { ...context.repo, number: pr.number });
+              if (repository.pullRequest.autoMergeRequest) {
+                await github.graphql(`
+                  mutation($id: ID!) {
+                    disablePullRequestAutoMerge(input: {pullRequestId: $id}) {
+                      pullRequest { number }
+                    }
+                  }`, { id: repository.pullRequest.id });
+              }
+            }
+
       - name: Approve PR
         if: >
-          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.go-policy.outputs.unchanged == 'true' &&
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
           steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
           (steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-           steps.metadata.outputs.package-ecosystem == 'github_actions')
+           steps.metadata.outputs.package-ecosystem == 'github_actions'))
         uses: actions/github-script@v9
         with:
           script: |
@@ -31,16 +93,20 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.payload.pull_request.number,
+              commit_id: context.payload.pull_request.head.sha,
               event: "APPROVE"
             });
 
       - name: Enable auto-merge
         if: >
-          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.go-policy.outputs.unchanged == 'true' &&
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
           steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
           (steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-           steps.metadata.outputs.package-ecosystem == 'github_actions')
-        uses: peter-evans/enable-pull-request-automerge@v3
-        with:
-          pull-request-number: ${{ github.event.pull_request.number }}
-          merge-method: squash
+           steps.metadata.outputs.package-ecosystem == 'github_actions'))
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_NUMBER"
