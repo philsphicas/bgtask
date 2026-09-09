@@ -10,7 +10,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.29
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/willabides/kongplete v0.4.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 )
 
 require (
