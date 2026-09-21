@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -60,8 +61,13 @@ func TestMCP_SubscriptionAcknowledgementFlushedBeforeRequestCompletes(t *testing
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
-		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	contentType := resp.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		t.Fatalf("parse Content-Type %q: %v", contentType, err)
+	}
+	if mediaType != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
