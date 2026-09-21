@@ -88,6 +88,12 @@ type statusRecorder struct {
 	wrote  bool
 }
 
+// Unwrap lets http.ResponseController flush MCP subscription events through
+// the logging wrapper without waiting for the streaming handler to return.
+func (s *statusRecorder) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
+}
+
 func (s *statusRecorder) WriteHeader(code int) {
 	if !s.wrote {
 		s.status = code

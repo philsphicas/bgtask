@@ -38,10 +38,9 @@ func boolPtr(b bool) *bool { return &b }
 //
 // The handler is stateless (StreamableHTTPOptions.Stateless), matching
 // bgtask's REST API: every call is a self-contained POST with no
-// server-retained session state, and no server-initiated requests or
-// notifications are used. JSONResponse is set because, with no
-// server-initiated interactions, a plain JSON response per call is
-// simpler than negotiating an SSE stream for a single reply.
+// server-retained session state. JSONResponse keeps ordinary tool replies
+// as plain JSON. The SDK still uses SSE for subscriptions/listen, including
+// its initial acknowledgement, so HTTP middleware must preserve flushing.
 // PropagateRequestCancellation ties a tool call's context to the
 // underlying HTTP request, so an aborted request doesn't leave taskservice
 // work running past its caller. The SDK's own localhost Host-header (DNS

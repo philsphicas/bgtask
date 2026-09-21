@@ -1,16 +1,114 @@
 package server_test
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/philsphicas/bgtask/internal/mcpserver"
 	"github.com/philsphicas/bgtask/internal/server"
 )
+
+func TestMCP_SubscriptionAcknowledgementFlushedBeforeRequestCompletes(t *testing.T) {
+	svc, _ := newTestService(t)
+	srv, err := server.New(server.Options{
+		Expose:     []server.Exposure{server.ExposeMCP},
+		MCPHandler: mcpserver.NewHandler(svc, "test"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	completed := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(completed)
+		srv.Handler().ServeHTTP(w, r)
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(`{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "subscriptions/listen",
+		"params": {
+			"notifications": {"toolsListChanged": true},
+			"_meta": {
+				"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+				"io.modelcontextprotocol/clientCapabilities": {}
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Protocol-Version", "2026-07-28")
+	req.Header.Set("Mcp-Method", "subscriptions/listen")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST subscriptions/listen: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	contentType := resp.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		t.Fatalf("parse Content-Type %q: %v", contentType, err)
+	}
+	if mediaType != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	var event, data string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			break
+		}
+		if value, ok := strings.CutPrefix(line, "event: "); ok {
+			event = value
+		}
+		if value, ok := strings.CutPrefix(line, "data: "); ok {
+			data = value
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read subscription acknowledgement: %v", err)
+	}
+	if event != "message" {
+		t.Fatalf("event = %q, want message", event)
+	}
+	var acknowledgement struct {
+		Method string                              `json:"method"`
+		Params mcp.SubscriptionsAcknowledgedParams `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(data), &acknowledgement); err != nil {
+		t.Fatalf("decode subscription acknowledgement: %v", err)
+	}
+	if acknowledgement.Method != "notifications/subscriptions/acknowledged" {
+		t.Fatalf("method = %q, want notifications/subscriptions/acknowledged", acknowledgement.Method)
+	}
+	if !acknowledgement.Params.Notifications.ToolsListChanged {
+		t.Error("toolsListChanged subscription was not acknowledged")
+	}
+	select {
+	case <-completed:
+		t.Fatal("subscription request completed before cancellation")
+	default:
+	}
+}
 
 // mcpToolNames connects an MCP client to url and returns the discovered
 // tool names, failing the test on any error.
