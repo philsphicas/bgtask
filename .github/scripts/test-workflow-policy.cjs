@@ -13,6 +13,10 @@ const updater = fs.readFileSync(
   path.join(workflows, "update-go-toolchain.yml"),
   "utf8",
 );
+const linterUpdater = fs.readFileSync(
+  path.join(workflows, "update-golangci-lint.yml"),
+  "utf8",
+);
 
 function step(workflow, name) {
   const block = workflow.split(`      - name: ${name}\n`)[1];
@@ -192,5 +196,99 @@ test("publishing requires main; dry runs may use feature branches", () => {
       },
     });
     assert.equal(result.status, status, result.stderr || String(result.error));
+  }
+});
+
+test("dependency remediation runs even when Go is current", () => {
+  assert.doesNotMatch(step(updater, "Remediate vulnerable modules"), /if:/);
+  for (const name of ["Create pull request", "Test updated module"]) {
+    assert.match(
+      step(updater, name),
+      /steps\.changes\.outputs\.changed == 'true'/,
+    );
+  }
+  assert.match(
+    step(updater, "Enable auto-merge for patch updates"),
+    /steps\.version\.outputs\.is-patch != 'false'/,
+  );
+  assert.match(updater, /cron: "0 10 \* \* \*"/);
+});
+
+test("linter publishing preserves dry-run, main-only and major-review safeguards", () => {
+  assert.match(linterUpdater, /dry_run:[\s\S]*?default: true/);
+  assert.equal(
+    script(step(linterUpdater, "Select run mode")),
+    script(step(updater, "Select run mode")),
+  );
+  for (const name of [
+    "Require PR token",
+    "Disable existing auto-merge before a major update",
+    "Create pull request",
+    "Enable auto-merge for non-major updates",
+  ]) {
+    assert.match(
+      step(linterUpdater, name),
+      /steps\.mode\.outputs\.publish == 'true'/,
+    );
+  }
+  assert.match(
+    step(linterUpdater, "Enable auto-merge for non-major updates"),
+    /steps\.version\.outputs\.major == 'false'/,
+  );
+  assert.match(
+    step(linterUpdater, "Enable auto-merge for non-major updates"),
+    /--match-head-commit "\$HEAD_SHA"/,
+  );
+  assert.match(
+    step(linterUpdater, "Create pull request"),
+    /add-paths: \.golangci-version/,
+  );
+});
+
+test("linter updater validates and compares stable versions without downgrading", () => {
+  const os = require("node:os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bgtask-linter-update-"));
+  try {
+    const run = script(step(linterUpdater, "Determine golangci-lint update"));
+    for (const [current, latest, expected, major, status] of [
+      ["v2.13.2", "v2.15.0", true, false, 0],
+      ["v2.9.0", "v2.15.0", true, false, 0],
+      ["v2.15.0", "v3.0.0", true, true, 0],
+      ["v2.15.0", "v2.15.0", false, false, 0],
+      ["v2.15.0", "v2.14.0", false, false, 0],
+      ["v3.0.0", "v2.15.0", false, true, 0],
+      ["v2.15.0", "v2.16.0-rc1", false, false, 1],
+      ["invalid", "v2.15.0", false, false, 1],
+    ]) {
+      fs.writeFileSync(path.join(dir, ".golangci-version"), `${current}\n`);
+      const output = path.join(dir, "outputs");
+      fs.writeFileSync(output, "");
+      const result = spawnSync(
+        "bash",
+        ["-c", `gh() { printf '%s\\n' "$LATEST"; }\n${run}`],
+        {
+          cwd: dir,
+          encoding: "utf8",
+          env: { ...process.env, LATEST: latest, GITHUB_OUTPUT: output },
+        },
+      );
+      assert.equal(result.status, status, result.stderr);
+      assert.equal(
+        fs.readFileSync(path.join(dir, ".golangci-version"), "utf8").trim(),
+        expected ? latest : current,
+      );
+      if (status === 0) {
+        const outputs = fs.readFileSync(output, "utf8");
+        assert.ok(outputs.includes(`update=${expected}\n`));
+        assert.ok(outputs.includes(`major=${major}\n`));
+      }
+    }
+    const result = spawnSync("bash", ["-c", `gh() { return 1; }\n${run}`], {
+      cwd: dir,
+      env: { ...process.env, GITHUB_OUTPUT: path.join(dir, "outputs") },
+    });
+    assert.notEqual(result.status, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true });
   }
 });

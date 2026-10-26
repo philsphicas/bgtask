@@ -68,10 +68,14 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Read golangci-lint version
+        id: golangci
+        run: echo "version=$(tr -d '\r\n' < .golangci-version)" >> "$GITHUB_OUTPUT"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13
+          version: ${{ steps.golangci.outputs.version }}
 
   vulncheck:
     runs-on: ubuntu-latest

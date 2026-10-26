@@ -53,11 +53,16 @@ The `go` directive in `go.mod` specifies the minimum Go version, including the
 patch release. CI, demo generation, and release builds install that same version
 with `go-version-file: go.mod`; there is no separate preferred `toolchain` version.
 
-The **Update Go Toolchain** workflow checks the latest stable Go release weekly
+The **Update Go Toolchain** workflow checks the latest stable Go release daily
 or on manual dispatch. It uses `go get go@VERSION toolchain@none` to update
-`go.mod`, runs `go mod tidy`, and opens or
-refreshes the `automation/go-toolchain` PR. Patch updates are eligible for
-auto-merge after required checks pass; feature releases require review. Maintainers
+`go.mod`, runs `go mod tidy`, and updates modules that `govulncheck` reports
+as vulnerable with a fix available to their latest release. Vulnerability
+remediation also runs when Go is already current. It makes at most three
+remediation passes, then requires a clean vulnerability scan and passing tests
+before opening or refreshing the `automation/go-toolchain` PR. Scan failures
+and vulnerabilities without an available fix fail the workflow rather than
+being ignored. Dependency-only and Go patch updates are eligible for
+auto-merge after required checks pass; Go feature releases require review. Maintainers
 must configure `GO_TOOLCHAIN_UPDATER_TOKEN` with Contents and Pull requests
 read/write permissions so generated PRs trigger CI.
 
@@ -68,6 +73,15 @@ any PRs. Push an updater branch and run
 to exercise it before merging. Scheduled runs publish automatically; to refresh
 an update PR manually after merging, dispatch on `main` with `dry_run=false`.
 Publishing from other branches is rejected.
+
+The **Update golangci-lint** workflow independently checks for linter releases
+daily and updates the exact CI version in `.golangci-version` through the
+`automation/golangci-lint` PR. Non-major updates are eligible for auto-merge
+after required checks pass; major updates require review. It uses the same
+automation token and defaults to a dry run on manual dispatch:
+`gh workflow run update-golangci-lint.yml --ref BRANCH -f dry_run=true`.
+The proposed diff appears in the run summary. Publishing requires the default
+branch and `dry_run=false`.
 
 Dependabot separately updates Go module dependencies and GitHub Actions versions
 daily. Its auto-merge policy requires review whenever a dependency PR also changes
