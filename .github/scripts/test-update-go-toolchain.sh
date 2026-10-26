@@ -108,6 +108,18 @@ go() {
         echo '{"finding":{"trace":[{"module":"example.com/unfixed"}]}}'
         return
         ;;
+      no-fix-package)
+        echo '{"finding":{"osv":"GO-TEST-1","trace":[{"module":"example.com/unfixed","package":"example.com/unfixed/pkg"}]}}'
+        return
+        ;;
+      no-fix-empty)
+        echo '{"finding":{"fixed_version":"","trace":[{"module":"example.com/unfixed"}]}}'
+        return
+        ;;
+      stdlib-only)
+        echo '{"finding":{"fixed_version":"go1.27.3","trace":[{"module":"stdlib"}]}}'
+        return
+        ;;
       clean)
         echo '{"config":{}}'
         return
@@ -121,11 +133,15 @@ go() {
 JSON
       : >"$TEST_SCANS"
     else
-      echo '{"config":{}}'
+      if [[ "$TEST_SCENARIO" == residual ]]; then
+        echo '{"finding":{"osv":"GO-TEST-2","trace":[{"module":"example.com/unfixed"}]}}'
+      else
+        echo '{"config":{}}'
+      fi
     fi
     ;;
   "run golang.org/x/vuln/cmd/govulncheck@latest ./...")
-    [[ "$TEST_SCENARIO" != no-fix && "$TEST_SCENARIO" != stdlib-failure ]]
+    [[ "$TEST_SCENARIO" != stdlib-failure ]]
     ;;
   get*) [[ "$TEST_SCENARIO" != get-failure ]] ;;
   "mod tidy"*) [[ "$TEST_SCENARIO" != tidy-failure ]] ;;
@@ -140,7 +156,7 @@ export -f go
 export TEST_SCENARIO TEST_SCANS="$temp_dir/scans"
 printf 'module example.com/test\n\ngo 1.27.1\n' >go.mod
 
-for scenario in fixed clean scan-failure malformed no-fix get-failure tidy-failure persistent stdlib-failure; do
+for scenario in fixed clean scan-failure malformed no-fix no-fix-package no-fix-empty stdlib-only residual get-failure tidy-failure persistent stdlib-failure; do
   TEST_SCENARIO="$scenario"
   : >"$TEST_CALLS"
   echo first >"$TEST_SCANS"
@@ -167,8 +183,11 @@ for scenario in fixed clean scan-failure malformed no-fix get-failure tidy-failu
     grep -qx 'get example.com/vulnerable@latest go@1.27.1 toolchain@none' "$TEST_CALLS"
     grep -qx 'mod tidy -go=1.27.1' "$TEST_CALLS"
     ;;
-  clean | scan-failure | malformed | no-fix)
+  clean | scan-failure | malformed | no-fix | no-fix-package | no-fix-empty | stdlib-only)
     ! grep -q '^get ' "$TEST_CALLS"
+    ;;
+  residual)
+    [[ "$(grep -c '^get ' "$TEST_CALLS")" -eq 1 ]]
     ;;
   get-failure)
     ! grep -q '^mod tidy' "$TEST_CALLS"
@@ -179,6 +198,12 @@ for scenario in fixed clean scan-failure malformed no-fix get-failure tidy-failu
   persistent)
     [[ "$(grep -c '^get ' "$TEST_CALLS")" -eq 3 ]]
     grep -q 'Fixable vulnerabilities remain' "$temp_dir/output"
+    ;;
+  esac
+  case "$scenario" in
+  no-fix | no-fix-package | no-fix-empty | stdlib-only | residual)
+    grep -q 'Unresolved vulnerability findings remain' "$temp_dir/output"
+    ! grep -qx 'run golang.org/x/vuln/cmd/govulncheck@latest ./...' "$TEST_CALLS"
     ;;
   esac
   echo "PASS: remediation $scenario"

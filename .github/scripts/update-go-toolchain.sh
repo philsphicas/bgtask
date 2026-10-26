@@ -72,6 +72,11 @@ remediate)
           | select(. != null and . != "stdlib" and . != "toolchain")]
         | unique[]' <<<"$report")"
     if [[ -z "$dependencies" ]]; then
+      if jq -es 'any(.[]; has("finding"))' <<<"$report" >/dev/null; then
+        jq -r 'select(.finding) | .finding |
+          "Unresolved vulnerability: \(.osv) in \(.trace[0].module)"' <<<"$report" >&2
+        fail "Unresolved vulnerability findings remain; refusing to publish updates."
+      fi
       # JSON mode reports findings without a failing status; enforce the usual gate.
       go run golang.org/x/vuln/cmd/govulncheck@latest ./...
       exit 0
