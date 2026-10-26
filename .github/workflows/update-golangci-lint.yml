@@ -1,0 +1,128 @@
+name: Update golangci-lint
+
+on:
+  schedule:
+    - cron: "30 10 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview the update without creating or modifying pull requests
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-golangci-lint
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Select run mode
+        id: mode
+        env:
+          PUBLISH: ${{ github.event_name == 'schedule' || !inputs.dry_run }}
+          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [[ "$PUBLISH" == true && "$GITHUB_REF" != "$DEFAULT_REF" ]]; then
+            echo "::error::Publishing is only allowed from the default branch. Use dry_run=true to test another branch."
+            exit 1
+          fi
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+
+      - name: Determine golangci-lint update
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest="$(GH_PAGER="" gh api repos/golangci/golangci-lint/releases/latest --jq .tag_name)"
+          current="$(tr -d '\r\n' < .golangci-version)"
+          for version in "$current" "$latest"; do
+            if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Expected an exact stable golangci-lint version, got '$version'."
+              exit 1
+            fi
+          done
+          update=false
+          if [[ "$current" != "$latest" &&
+                "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" == "$latest" ]]; then
+            update=true
+            printf '%s\n' "$latest" > .golangci-version
+          fi
+          major=false
+          if [[ "${current%%.*}" != "${latest%%.*}" ]]; then
+            major=true
+          fi
+          {
+            echo "latest=$latest"
+            echo "update=$update"
+            echo "major=$major"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Preview update
+        run: |
+          {
+            echo "## golangci-lint update"
+            echo '```diff'
+            git diff -- .golangci-version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require PR token
+        if: steps.version.outputs.update == 'true' && steps.mode.outputs.publish == 'true'
+        env:
+          TOKEN: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
+        run: |
+          if [[ -z "$TOKEN" ]]; then
+            echo "::error::GO_TOOLCHAIN_UPDATER_TOKEN is required to create updater PRs that trigger normal CI."
+            exit 1
+          fi
+
+      - name: Disable existing auto-merge before a major update
+        if: steps.version.outputs.major == 'true' && steps.mode.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          number="$(GH_PAGER="" gh pr list --base "$BASE" --head automation/golangci-lint --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "$number" ]]; then
+            GH_PAGER="" gh pr merge --disable-auto "$number"
+          fi
+
+      - name: Create pull request
+        id: pull-request
+        if: steps.version.outputs.update == 'true' && steps.mode.outputs.publish == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
+          base: ${{ github.event.repository.default_branch }}
+          branch: automation/golangci-lint
+          delete-branch: true
+          commit-message: "build: update golangci-lint to ${{ steps.version.outputs.latest }}"
+          title: "build: update golangci-lint to ${{ steps.version.outputs.latest }}"
+          body: |
+            Updates `.golangci-version` to `${{ steps.version.outputs.latest }}`.
+
+            Non-major updates are eligible for auto-merge after required checks pass.
+            Major updates require review.
+          add-paths: .golangci-version
+
+      - name: Enable auto-merge for non-major updates
+        if: >
+          steps.mode.outputs.publish == 'true' &&
+          steps.version.outputs.major == 'false' &&
+          steps.pull-request.outputs.pull-request-number != '' &&
+          steps.pull-request.outputs.pull-request-operation != 'closed'
+        env:
+          GH_TOKEN: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
+          PR_NUMBER: ${{ steps.pull-request.outputs.pull-request-number }}
+          HEAD_SHA: ${{ steps.pull-request.outputs.pull-request-head-sha }}
+        run: GH_PAGER="" gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_NUMBER"

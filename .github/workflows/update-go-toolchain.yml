@@ -2,7 +2,7 @@ name: Update Go Toolchain
 
 on:
   schedule:
-    - cron: "0 10 * * 1"
+    - cron: "0 10 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -55,8 +55,35 @@ jobs:
         shell: bash
         run: bash .github/scripts/update-go-toolchain.sh check >> "$GITHUB_OUTPUT"
 
+      - name: Update module metadata
+        if: steps.version.outputs.update-available == 'true'
+        env:
+          LATEST: ${{ steps.version.outputs.latest }}
+        run: bash .github/scripts/update-go-toolchain.sh update "$LATEST"
+
+      - name: Remediate vulnerable modules
+        run: bash .github/scripts/update-go-toolchain.sh remediate
+
+      - name: Determine changes
+        id: changes
+        env:
+          GO_UPDATE: ${{ steps.version.outputs.update-available }}
+          LATEST: ${{ steps.version.outputs.latest }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- go.mod go.sum; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          title="build: update vulnerable Go modules"
+          if [[ "$GO_UPDATE" == true ]]; then
+            title="build: update Go toolchain to $LATEST"
+          fi
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+
       - name: Require PR token
-        if: steps.version.outputs.update-available == 'true' && steps.mode.outputs.publish == 'true'
+        if: steps.changes.outputs.changed == 'true' && steps.mode.outputs.publish == 'true'
         env:
           TOKEN: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
         run: |
@@ -65,14 +92,8 @@ jobs:
             exit 1
           fi
 
-      - name: Update module metadata
-        if: steps.version.outputs.update-available == 'true'
-        env:
-          LATEST: ${{ steps.version.outputs.latest }}
-        run: bash .github/scripts/update-go-toolchain.sh update "$LATEST"
-
       - name: Test updated module
-        if: steps.version.outputs.update-available == 'true'
+        if: steps.changes.outputs.changed == 'true'
         run: go test -count=1 ./...
 
       - name: Preview update
@@ -83,7 +104,7 @@ jobs:
           git diff --check
           git diff -- go.mod go.sum > "$RUNNER_TEMP/go-toolchain-update.patch"
           {
-            echo "## Go toolchain update"
+            echo "## Go and vulnerability update"
             echo
             echo "Publishing enabled: $PUBLISH"
             echo
@@ -117,25 +138,27 @@ jobs:
 
       - name: Create pull request
         id: pull-request
-        if: steps.version.outputs.update-available == 'true' && steps.mode.outputs.publish == 'true'
+        if: steps.changes.outputs.changed == 'true' && steps.mode.outputs.publish == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GO_TOOLCHAIN_UPDATER_TOKEN }}
           base: ${{ github.event.repository.default_branch }}
           branch: automation/go-toolchain
           delete-branch: true
-          commit-message: "build: update Go toolchain to ${{ steps.version.outputs.latest }}"
-          title: "build: update Go toolchain to ${{ steps.version.outputs.latest }}"
+          commit-message: ${{ steps.changes.outputs.title }}
+          title: ${{ steps.changes.outputs.title }}
           body: |
-            Updates the minimum Go version from ${{ steps.version.outputs.current }} to
-            ${{ steps.version.outputs.latest }} and runs `go mod tidy` with that exact Go release.
+            Updates Go when a newer stable release is available and updates modules
+            that `govulncheck` reports as vulnerable with a fix available.
 
-            The resulting module has no separate `toolchain` directive.
+            The resulting module uses an exact Go version with no separate `toolchain`
+            directive. Tests and vulnerability checks must pass before publication.
 
             CI, demos, and release builds use `go-version-file: go.mod`, so they follow
             this update without separate workflow version edits.
 
-            Patch-level Go updates are eligible for auto-merge after required checks pass. Feature releases require review.
+            Dependency-only and patch-level Go updates are eligible for auto-merge
+            after required checks pass. Go feature releases require review.
           add-paths: |
             go.mod
             go.sum
@@ -143,7 +166,7 @@ jobs:
       - name: Enable auto-merge for patch updates
         if: >
           steps.mode.outputs.publish == 'true' &&
-          steps.version.outputs.is-patch == 'true' &&
+          steps.version.outputs.is-patch != 'false' &&
           steps.pull-request.outputs.pull-request-number != '' &&
           steps.pull-request.outputs.pull-request-operation != 'closed'
         env:

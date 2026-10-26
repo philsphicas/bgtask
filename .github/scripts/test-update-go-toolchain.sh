@@ -12,7 +12,7 @@ go() {
   if [[ "$*" == "env GOVERSION" ]]; then
     printf 'go%s\n' "$TEST_LATEST"
   else
-    printf '%s\n' "$*" >> "$TEST_CALLS"
+    printf '%s\n' "$*" >>"$TEST_CALLS"
     if [[ "$1 $2" == "mod tidy" ]]; then
       return "${TEST_TIDY_STATUS:-0}"
     fi
@@ -23,18 +23,18 @@ export TEST_LATEST TEST_CALLS="$temp_dir/calls"
 
 check() {
   local name="$1" current="$2" toolchain="$3" latest="$4" available="$5" patch="${6:-}"
-  printf 'module example.com/test\n\ngo %s\n' "$current" > go.mod
+  printf 'module example.com/test\n\ngo %s\n' "$current" >go.mod
   if [[ -n "$toolchain" ]]; then
-    printf '\ntoolchain %s\n' "$toolchain" >> go.mod
+    printf '\ntoolchain %s\n' "$toolchain" >>go.mod
   fi
   TEST_LATEST="$latest"
   local result
   result="$(bash "$script_dir/update-go-toolchain.sh" check)"
-  grep -qx "update-available=$available" <<< "$result"
+  grep -qx "update-available=$available" <<<"$result"
   if [[ "$available" == true ]]; then
-    grep -qx "current=$current" <<< "$result"
-    grep -qx "latest=$latest" <<< "$result"
-    grep -qx "is-patch=$patch" <<< "$result"
+    grep -qx "current=$current" <<<"$result"
+    grep -qx "latest=$latest" <<<"$result"
+    grep -qx "is-patch=$patch" <<<"$result"
   fi
   echo "PASS: $name"
 }
@@ -54,17 +54,17 @@ check "no preferred toolchain downgrade" 1.27.0 go1.28.0 1.27.1 false
 check "legacy minor-only version" 1.26 "" 1.27.1 true false
 
 for version in "" 1.27rc1 invalid; do
-  printf 'module example.com/test\n\ngo %s\n' "$version" > go.mod
-  if bash "$script_dir/update-go-toolchain.sh" check > /dev/null 2>&1; then
+  printf 'module example.com/test\n\ngo %s\n' "$version" >go.mod
+  if bash "$script_dir/update-go-toolchain.sh" check >/dev/null 2>&1; then
     echo "FAIL: accepted invalid version '$version'" >&2
     exit 1
   fi
 done
 echo "PASS: invalid metadata fails"
 
-printf 'module example.com/test\n\ngo 1.27.0\n' > go.mod
+printf 'module example.com/test\n\ngo 1.27.0\n' >go.mod
 TEST_LATEST=1.28rc1
-if bash "$script_dir/update-go-toolchain.sh" check > /dev/null 2>&1; then
+if bash "$script_dir/update-go-toolchain.sh" check >/dev/null 2>&1; then
   echo "FAIL: accepted a prerelease" >&2
   exit 1
 fi
@@ -76,8 +76,8 @@ expected="$(printf '%s\n' 'get go@1.27.1 toolchain@none' 'mod tidy -go=1.27.1' '
 [[ "$(cat "$TEST_CALLS")" == "$expected" ]]
 echo "PASS: exact version update and tidy"
 
-: > "$TEST_CALLS"
-if bash "$script_dir/update-go-toolchain.sh" update 1.27.2 > /dev/null 2>&1; then
+: >"$TEST_CALLS"
+if bash "$script_dir/update-go-toolchain.sh" update 1.27.2 >/dev/null 2>&1; then
   echo "FAIL: accepted the wrong installed toolchain" >&2
   exit 1
 fi
@@ -85,19 +85,136 @@ fi
 echo "PASS: toolchain mismatch fails before editing"
 
 export TEST_TIDY_STATUS=1
-if bash "$script_dir/update-go-toolchain.sh" update 1.27.1 > /dev/null 2>&1; then
+if bash "$script_dir/update-go-toolchain.sh" update 1.27.1 >/dev/null 2>&1; then
   echo "FAIL: ignored tidy failure" >&2
   exit 1
 fi
-[[ "$(wc -l < "$TEST_CALLS")" -eq 2 ]]
+[[ "$(wc -l <"$TEST_CALLS")" -eq 2 ]]
 echo "PASS: tidy failure stops the update"
+
+go() {
+  [[ "$GOTOOLCHAIN" == local ]] || return 90
+  printf '%s\n' "$*" >>"$TEST_CALLS"
+  case "$*" in
+  "run golang.org/x/vuln/cmd/govulncheck@latest -format json ./...")
+    if [[ -s "$TEST_SCANS" || "$TEST_SCENARIO" == persistent ]]; then
+      case "$TEST_SCENARIO" in
+      scan-failure) return 1 ;;
+      malformed)
+        echo "not json"
+        return
+        ;;
+      no-fix)
+        echo '{"finding":{"trace":[{"module":"example.com/unfixed"}]}}'
+        return
+        ;;
+      no-fix-package)
+        echo '{"finding":{"osv":"GO-TEST-1","trace":[{"module":"example.com/unfixed","package":"example.com/unfixed/pkg"}]}}'
+        return
+        ;;
+      no-fix-empty)
+        echo '{"finding":{"fixed_version":"","trace":[{"module":"example.com/unfixed"}]}}'
+        return
+        ;;
+      stdlib-only)
+        echo '{"finding":{"fixed_version":"go1.27.3","trace":[{"module":"stdlib"}]}}'
+        return
+        ;;
+      clean)
+        echo '{"config":{}}'
+        return
+        ;;
+      esac
+      cat <<'JSON'
+{"finding":{"fixed_version":"v1.2.0","trace":[{"module":"example.com/vulnerable"}]}}
+{"finding":{"fixed_version":"v1.2.0","trace":[{"module":"example.com/vulnerable"}]}}
+{"finding":{"fixed_version":"go1.27.3","trace":[{"module":"stdlib"}]}}
+{"finding":{"fixed_version":"go1.27.3","trace":[{"module":"toolchain"}]}}
+JSON
+      : >"$TEST_SCANS"
+    else
+      if [[ "$TEST_SCENARIO" == residual ]]; then
+        echo '{"finding":{"osv":"GO-TEST-2","trace":[{"module":"example.com/unfixed"}]}}'
+      else
+        echo '{"config":{}}'
+      fi
+    fi
+    ;;
+  "run golang.org/x/vuln/cmd/govulncheck@latest ./...")
+    [[ "$TEST_SCENARIO" != stdlib-failure ]]
+    ;;
+  get*) [[ "$TEST_SCENARIO" != get-failure ]] ;;
+  "mod tidy"*) [[ "$TEST_SCENARIO" != tidy-failure ]] ;;
+  "mod edit -toolchain=none") ;;
+  *)
+    echo "Unexpected Go invocation: $*" >&2
+    return 1
+    ;;
+  esac
+}
+export -f go
+export TEST_SCENARIO TEST_SCANS="$temp_dir/scans"
+printf 'module example.com/test\n\ngo 1.27.1\n' >go.mod
+
+for scenario in fixed clean scan-failure malformed no-fix no-fix-package no-fix-empty stdlib-only residual get-failure tidy-failure persistent stdlib-failure; do
+  TEST_SCENARIO="$scenario"
+  : >"$TEST_CALLS"
+  echo first >"$TEST_SCANS"
+  status=0
+  bash "$script_dir/update-go-toolchain.sh" remediate >"$temp_dir/output" 2>&1 || status=$?
+  case "$scenario" in
+  fixed | clean)
+    [[ "$status" -eq 0 ]] || {
+      cat "$temp_dir/output" >&2
+      exit 1
+    }
+    grep -qx 'run golang.org/x/vuln/cmd/govulncheck@latest ./...' "$TEST_CALLS"
+    ;;
+  *)
+    [[ "$status" -ne 0 ]] || {
+      echo "FAIL: remediation ignored $scenario" >&2
+      exit 1
+    }
+    ;;
+  esac
+  case "$scenario" in
+  fixed)
+    [[ "$(grep -c '^get ' "$TEST_CALLS")" -eq 1 ]]
+    grep -qx 'get example.com/vulnerable@latest go@1.27.1 toolchain@none' "$TEST_CALLS"
+    grep -qx 'mod tidy -go=1.27.1' "$TEST_CALLS"
+    ;;
+  clean | scan-failure | malformed | no-fix | no-fix-package | no-fix-empty | stdlib-only)
+    ! grep -q '^get ' "$TEST_CALLS"
+    ;;
+  residual)
+    [[ "$(grep -c '^get ' "$TEST_CALLS")" -eq 1 ]]
+    ;;
+  get-failure)
+    ! grep -q '^mod tidy' "$TEST_CALLS"
+    ;;
+  tidy-failure)
+    ! grep -q '^mod edit' "$TEST_CALLS"
+    ;;
+  persistent)
+    [[ "$(grep -c '^get ' "$TEST_CALLS")" -eq 3 ]]
+    grep -q 'Fixable vulnerabilities remain' "$temp_dir/output"
+    ;;
+  esac
+  case "$scenario" in
+  no-fix | no-fix-package | no-fix-empty | stdlib-only | residual)
+    grep -q 'Unresolved vulnerability findings remain' "$temp_dir/output"
+    ! grep -qx 'run golang.org/x/vuln/cmd/govulncheck@latest ./...' "$TEST_CALLS"
+    ;;
+  esac
+  echo "PASS: remediation $scenario"
+done
 
 # Check the real Go command's edits and idempotence in a dependency-free module.
 unset -f go
 installed="$(GOTOOLCHAIN=local go env GOVERSION)"
 latest="${installed#go}"
-printf 'module example.com/test\n\ngo 1.21.0\n\ntoolchain %s\n' "$installed" > go.mod
-printf 'package test\n' > test.go
+printf 'module example.com/test\n\ngo 1.21.0\n\ntoolchain %s\n' "$installed" >go.mod
+printf 'package test\n' >test.go
 bash "$script_dir/update-go-toolchain.sh" update "$latest"
 grep -qx "go $latest" go.mod
 if grep -q '^toolchain ' go.mod; then
@@ -108,7 +225,7 @@ result="$(bash "$script_dir/update-go-toolchain.sh" check)"
 [[ "$result" == "update-available=false" ]]
 echo "PASS: real module update is normalized and idempotent"
 
-printf 'module example.com/test\n\ngo 99.0.0\n' > go.mod
+printf 'module example.com/test\n\ngo 99.0.0\n' >go.mod
 result="$(bash "$script_dir/update-go-toolchain.sh" check)"
 [[ "$result" == "update-available=false" ]]
 echo "PASS: real compiler discovery works with a newer module requirement"
