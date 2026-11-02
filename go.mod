@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	charm.land/lipgloss/v2 v2.0.6
-	github.com/alecthomas/kong v1.16.1
+	github.com/alecthomas/kong v1.17.0
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/google/jsonschema-go v0.4.3
 	github.com/mattn/go-runewidth v0.0.31
