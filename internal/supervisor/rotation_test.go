@@ -214,6 +214,30 @@ func TestWriterRecordsLatestErrorAndRetriesFailedDiagnostic(t *testing.T) {
 	}
 }
 
+func TestWriterRerecordsDiagnosticAfterFailedRewrite(t *testing.T) {
+	w, store, id := rotationWriter(t, 256)
+	errPath := filepath.Join(store.TaskDir(id), "log-error")
+	w.reportError(errors.New("A"))
+
+	// Rewriting with a different error fails, which can truncate the file.
+	if err := os.Remove(errPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(errPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.reportError(errors.New("B"))
+	if err := os.Remove(errPath); err != nil {
+		t.Fatal(err)
+	}
+
+	w.reportError(errors.New("A"))
+	data, err := os.ReadFile(errPath)
+	if err != nil || string(data) != "A\n" {
+		t.Fatalf("diagnostic = %q, err = %v; want A to be recorded again", data, err)
+	}
+}
+
 func TestWriterOmitsOversizedEntry(t *testing.T) {
 	w, store, id := rotationWriter(t, 256)
 	w.WriteHealthEvent("health_fail", strings.Repeat("x", 1024))

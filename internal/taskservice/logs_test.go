@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/philsphicas/bgtask/internal/state"
 	"github.com/philsphicas/bgtask/internal/supervisor"
 	"github.com/philsphicas/bgtask/internal/taskservice"
 )
@@ -266,6 +267,26 @@ func TestLogsFollowHandleStopsBeforeIncompleteRecord(t *testing.T) {
 	}
 	if string(rest) != fragment {
 		t.Fatalf("handle should resume before the incomplete record, got %q", rest)
+	}
+}
+
+func TestLogsRejectsRecordLargerThanLogFileLimit(t *testing.T) {
+	svc, _ := newTestService(t)
+	created := mustRun(t, svc, "huge-record", []string{"sleep", "100"})
+	path := svc.Store.OutputPath(created.Task.ID)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unterminated record also has to be bounded.
+	if _, err := f.WriteString(strings.Repeat("x", state.MaxLogSize+1024)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Logs(context.Background(), taskservice.LogsRequest{Ref: "huge-record", Tail: 1}); err == nil {
+		t.Fatal("expected an error for a record larger than the log file limit")
 	}
 }
 

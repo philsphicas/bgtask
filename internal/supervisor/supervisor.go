@@ -678,8 +678,10 @@ func (w *jsonlWriter) reportError(err error) {
 	if message == w.diagnostic {
 		return
 	}
+	w.diagnostic = ""
 	path := filepath.Join(w.store.TaskDir(w.id), "log-error")
 	if writeErr := os.WriteFile(path, []byte(message+"\n"), 0o600); writeErr != nil {
+		// WriteFile may have truncated the previous contents.
 		_, _ = fmt.Fprintf(os.Stderr, "bgtask log error: %v (recording error: %v)\n", err, writeErr)
 		return
 	}

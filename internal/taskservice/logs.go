@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -145,6 +146,27 @@ func filterEntries(raw []supervisor.LogEntry, stdoutOnly, stderrOnly bool, since
 	return out
 }
 
+// errRecordTooLong is returned for a log record larger than a log file may
+// legitimately hold.
+var errRecordTooLong = errors.New("log record exceeds the maximum log file size")
+
+// readRecord reads one newline-terminated record, holding at most limit
+// bytes in memory. A record cut off by EOF is returned with io.EOF.
+func readRecord(r *bufio.Reader, limit int) ([]byte, error) {
+	var record []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		record = append(record, chunk...)
+		if len(record) > limit {
+			return nil, errRecordTooLong
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return record, err
+	}
+}
+
 // readLogFile reads all JSONL entries from an open log file, oldest first.
 // end is the offset just past the last record consumed. A trailing fragment
 // that is not yet a complete record is excluded, so a follower resuming at
@@ -152,7 +174,7 @@ func filterEntries(raw []supervisor.LogEntry, stdoutOnly, stderrOnly bool, since
 func readLogFile(f *os.File) (entries []supervisor.LogEntry, end int64, err error) {
 	reader := bufio.NewReader(f)
 	for {
-		line, readErr := reader.ReadBytes('\n')
+		line, readErr := readRecord(reader, state.MaxLogSize+1)
 		if len(line) > 0 {
 			var e supervisor.LogEntry
 			parsed := json.Unmarshal(line, &e) == nil
