@@ -524,7 +524,7 @@ func TestJsonlWriter_CloseAndWrite(t *testing.T) {
 	}
 
 	w := &jsonlWriter{f: f}
-	w.close(f)
+	w.close()
 	// Write after close should not panic.
 	w.WriteOutput("o", "should be silently dropped\n")
 }

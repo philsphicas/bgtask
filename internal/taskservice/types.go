@@ -1,6 +1,7 @@
 package taskservice
 
 import (
+	"os"
 	"time"
 
 	"github.com/philsphicas/bgtask/internal/state"
@@ -97,6 +98,7 @@ type LogsRequest struct {
 	All    bool          // include entries from previous runs (default: current run only)
 	Stdout bool          // only stdout entries
 	Stderr bool          // only stderr entries
+	Follow bool          // return the newest log file for the caller to follow; see LogsResult.Follow
 }
 
 // LogsResult is returned by Service.Logs.
@@ -107,13 +109,19 @@ type LogsResult struct {
 	// (independent of whether any entries survived filtering).
 	HasAnyLogFile bool
 
-	// OutputPath is the path to the task's current (newest) log file,
-	// useful for a caller implementing its own follow/tail-f loop.
+	// OutputPath is the path to the task's current (newest) log file.
 	OutputPath string
 
 	// ExitPath is the path to the task's exit.json, useful for a follow
 	// loop to detect when the task has exited.
 	ExitPath string
+
+	// Follow is set only when LogsRequest.Follow is true and a log file
+	// exists. It is the newest file at the time of the read, positioned
+	// immediately after the last entry in Entries, so a follow loop resumes
+	// without missing entries even if the file is rotated meanwhile. The
+	// caller owns the handle and must close it.
+	Follow *os.File
 }
 
 // OperationResult describes the outcome of a single-task mutating

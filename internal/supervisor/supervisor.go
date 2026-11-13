@@ -7,13 +7,16 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,11 +85,12 @@ func Run(cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("open log file: %w", err)
 	}
-	// logFile is managed explicitly: closed during rotation and on exit.
-	// Do not defer logFile.Close() -- rotation reassigns logFile, so the
-	// deferred close would act on a stale descriptor.
-
-	logger := &jsonlWriter{f: logFile}
+	info, err := logFile.Stat()
+	if err != nil {
+		_ = logFile.Close()
+		return fmt.Errorf("stat log file: %w", err)
+	}
+	logger := &jsonlWriter{f: logFile, store: cfg.Store, id: cfg.Meta.ID, size: info.Size(), maxSize: state.MaxLogSize}
 
 	// Set up signal handling.
 	var stopRequested atomic.Bool
@@ -257,9 +261,7 @@ func Run(cfg *Config) error {
 
 	// closeLogFile is a helper that ensures the current logFile is closed
 	// exactly once before returning from Run.
-	closeLogFile := func() {
-		logger.close(logFile)
-	}
+	closeLogFile := logger.close
 
 	attempt := 0
 	for {
@@ -317,25 +319,6 @@ func Run(cfg *Config) error {
 		delay := cfg.computeDelay(attempt)
 		delayStr := delay.String()
 		logger.WriteEvent("restarting", &exitCode, &attempt, delayStr)
-
-		// Rotate log if needed before restarting. On Windows, files can't be
-		// renamed while open, so close first, rotate, then reopen.
-		if shouldRotate, _ := cfg.Store.ShouldRotateLog(cfg.Meta.ID, state.MaxLogSize); shouldRotate {
-			logger.close(logFile)
-			_ = cfg.Store.RotateLog(cfg.Meta.ID)
-			newLogFile, openErr := os.OpenFile(cfg.Store.OutputPath(cfg.Meta.ID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-			if openErr == nil {
-				logger.setFile(newLogFile)
-				logFile = newLogFile
-			} else {
-				// Rotation failed to reopen -- reopen the original path.
-				newLogFile, _ = os.OpenFile(cfg.Store.OutputPath(cfg.Meta.ID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-				if newLogFile != nil {
-					logger.setFile(newLogFile)
-					logFile = newLogFile
-				}
-			}
-		}
 
 		// Wait for delay or stop/restart signal.
 		timer := time.NewTimer(delay)
@@ -505,9 +488,29 @@ func exitCodeFrom(err error) int {
 
 // jsonlWriter writes log entries to a JSONL file, thread-safe.
 type jsonlWriter struct {
-	f  *os.File
-	mu sync.Mutex
+	f       *os.File
+	mu      sync.Mutex
+	store   *state.Store
+	id      string
+	size    int64
+	maxSize int64
+	closed  bool
+	// failed is set while logging is interrupted; the next successful write
+	// is preceded by a notice record.
+	failed bool
+	// partial is set when a failed write may have left an incomplete record
+	// at the end of the file.
+	partial bool
+	// diagnostic is the message last stored in log-error.
+	diagnostic string
+	rotation   *state.LogRotation
+	// retryRotateAt delays the next rotation attempt after a failure, during
+	// which the current file keeps growing instead of dropping output.
+	retryRotateAt time.Time
 }
+
+// rotateRetryInterval spaces out rotation attempts while rotation is failing.
+const rotateRetryInterval = time.Second
 
 func (w *jsonlWriter) WriteOutput(stream, data string) {
 	w.write(LogEntry{
@@ -539,17 +542,14 @@ func (w *jsonlWriter) WriteHealthEvent(event string, message string) {
 	w.write(e)
 }
 
-func (w *jsonlWriter) close(f *os.File) {
+func (w *jsonlWriter) close() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_ = f.Close()
+	w.closed = true
+	if w.f != nil {
+		_ = w.f.Close()
+	}
 	w.f = nil
-}
-
-func (w *jsonlWriter) setFile(f *os.File) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.f = f
 }
 
 func (w *jsonlWriter) write(entry LogEntry) {
@@ -559,7 +559,161 @@ func (w *jsonlWriter) write(entry LogEntry) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.f != nil {
-		_, _ = w.f.Write(append(data, '\n'))
+	if w.closed {
+		return
 	}
+	// Keep even unusually large health-check messages within the file limit.
+	if w.maxSize > 0 && int64(len(data)+1) > w.maxSize {
+		entry.Data = "log_entry_omitted"
+		entry.Message = "log entry exceeded the maximum log file size"
+		entry.Code = nil
+		entry.Attempt = nil
+		entry.Delay = ""
+		data, err = json.Marshal(entry)
+		if err != nil {
+			w.reportError(err)
+			return
+		}
+	}
+	data = append(data, '\n')
+	if w.failed && w.store != nil {
+		notice, err := json.Marshal(LogEntry{
+			Time: time.Now(), Stream: "x", Data: "log_error",
+			Message: "logging was interrupted; see log-error in the task directory",
+		})
+		if err != nil {
+			w.reportError(err)
+			return
+		}
+		notice = append(notice, '\n')
+		switch {
+		case w.maxSize > 0 && int64(len(notice)) > w.maxSize:
+			// The separate diagnostic file still records the failure.
+			w.failed = false
+		case w.maxSize > 0 && int64(len(notice)+len(data)) > w.maxSize:
+			// Keep the notice even when the record needs its own file.
+			if !w.append(notice) {
+				return
+			}
+			w.failed = false
+		default:
+			data = slices.Concat(notice, data)
+		}
+	}
+	if w.append(data) {
+		w.failed = false
+	}
+}
+
+// append writes complete records, rotating first when they would not fit in
+// the current file. It reports whether the records were written.
+func (w *jsonlWriter) append(record []byte) bool {
+	pad := int64(0)
+	if w.partial {
+		pad = 1
+	}
+	needRotate := w.f == nil ||
+		(w.size > 0 && w.size+pad+int64(len(record)) > w.maxSize && !time.Now().Before(w.retryRotateAt))
+	if w.store != nil && needRotate {
+		if err := w.rotate(); err != nil {
+			// rotate reopens the current file when it can, so output is
+			// kept (past the size limit) until rotation works again.
+			w.reportError(err)
+			w.retryRotateAt = time.Now().Add(rotateRetryInterval)
+		} else {
+			w.retryRotateAt = time.Time{}
+		}
+	}
+	if w.f == nil {
+		return false
+	}
+	// A failed write may have left a fragment; end it so the record that
+	// follows starts on its own line.
+	if w.partial {
+		record = slices.Concat([]byte{'\n'}, record)
+	}
+	n, err := w.f.Write(record)
+	w.size += int64(n)
+	if err != nil {
+		w.partial = w.partial || n > 0
+		w.reportError(fmt.Errorf("write log: %w", err))
+		return false
+	}
+	w.partial = false
+	return true
+}
+
+// rotate shifts the current log into the backups and opens a fresh current
+// file. If shifting fails, it still reopens the current file for appending
+// and returns the shift error, so the caller can keep logging and retry.
+func (w *jsonlWriter) rotate() error {
+	if w.f != nil {
+		if err := w.f.Close(); err != nil {
+			w.f = nil
+			return fmt.Errorf("close log for rotation: %w", err)
+		}
+		w.f = nil
+	}
+	path := w.store.OutputPath(w.id)
+	var rotateErr error
+	if w.size > 0 {
+		rotateErr = w.shiftLogs(path)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return errors.Join(rotateErr, fmt.Errorf("open log after rotation: %w", err))
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return errors.Join(rotateErr, fmt.Errorf("stat log after rotation: %w", err))
+	}
+	w.f = f
+	w.size = info.Size()
+	if w.size == 0 {
+		w.partial = false
+	}
+	return rotateErr
+}
+
+// shiftLogs moves the current log to the first backup. A current file that
+// no longer exists has nothing to rotate.
+func (w *jsonlWriter) shiftLogs(path string) error {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		w.rotation = nil
+		w.size = 0
+		return nil
+	}
+	if w.rotation == nil {
+		w.rotation = w.store.NewLogRotation(w.id)
+	}
+	if err := w.rotation.Rotate(); err != nil {
+		return fmt.Errorf("rotate log: %w", err)
+	}
+	w.rotation = nil
+	w.size = 0
+	return nil
+}
+
+// reportError leaves a bounded, visible diagnostic even when log writes fail.
+// log-error always holds the latest distinct error; it is rewritten when the
+// error changes or an earlier attempt to record it failed.
+func (w *jsonlWriter) reportError(err error) {
+	if w.store == nil {
+		_, _ = fmt.Fprintf(os.Stderr, "bgtask log error: %v\n", err)
+		return
+	}
+	w.failed = true
+	message := err.Error()
+	if message == w.diagnostic {
+		return
+	}
+	w.diagnostic = ""
+	path := filepath.Join(w.store.TaskDir(w.id), "log-error")
+	if writeErr := os.WriteFile(path, []byte(message+"\n"), 0o600); writeErr != nil {
+		// WriteFile may have truncated the previous contents.
+		_, _ = fmt.Fprintf(os.Stderr, "bgtask log error: %v (recording error: %v)\n", err, writeErr)
+		return
+	}
+	w.diagnostic = message
 }

@@ -4,15 +4,18 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/philsphicas/bgtask/internal/state"
 	"github.com/philsphicas/bgtask/internal/supervisor"
 )
 
 // Logs returns log entries for a task, applying tail/since/all/stream
-// filters. It avoids opening older rotated log files once either:
+// filters. It avoids reading older rotated log files once either:
 //
 //   - a bounded tail request (req.Tail >= 0) has already collected enough
 //     matching entries from newer files, or
@@ -47,7 +50,16 @@ func (s *Service) Logs(ctx context.Context, req LogsRequest) (*LogsResult, error
 		}
 	}
 
-	logFiles := s.Store.ListLogFiles(id) // newest first
+	logFiles := state.OpenLogSnapshot(s.Store.OutputPath(id))
+	// follow is the newest file handed to the caller; it must stay open.
+	var follow *os.File
+	defer func() {
+		for _, lf := range logFiles {
+			if lf.File != nil && lf.File != follow {
+				_ = lf.File.Close()
+			}
+		}
+	}()
 	taskDir := s.Store.TaskDir(id)
 	result := &LogsResult{
 		HasAnyLogFile: len(logFiles) > 0,
@@ -60,10 +72,18 @@ func (s *Service) Logs(ctx context.Context, req LogsRequest) (*LogsResult, error
 	// yields the overall chronological entry list.
 	var chunks [][]supervisor.LogEntry
 	matched := 0
-	for _, f := range logFiles {
-		raw, err := readLogFile(f)
+	var newestEnd int64
+	for i, lf := range logFiles {
+		// An older file that is never reached cannot fail the request.
+		if lf.File == nil {
+			return nil, Internal(op, req.Ref, id, lf.Err)
+		}
+		raw, end, err := readLogFile(lf.File)
 		if err != nil {
 			return nil, Internal(op, req.Ref, id, err)
+		}
+		if i == 0 {
+			newestEnd = end
 		}
 		filtered := filterEntries(raw, req.Stdout, req.Stderr, effectiveSince)
 		chunks = append(chunks, filtered)
@@ -93,6 +113,16 @@ func (s *Service) Logs(ctx context.Context, req LogsRequest) (*LogsResult, error
 		}
 	}
 
+	// The newest file is always read first, so it is positioned exactly
+	// after the entries above and a follower misses nothing written since.
+	if req.Follow && len(logFiles) > 0 {
+		if _, err := logFiles[0].File.Seek(newestEnd, io.SeekStart); err != nil {
+			return nil, Internal(op, req.Ref, id, err)
+		}
+		follow = logFiles[0].File
+		result.Follow = follow
+	}
+
 	result.Entries = entries
 	return result, nil
 }
@@ -116,31 +146,50 @@ func filterEntries(raw []supervisor.LogEntry, stdoutOnly, stderrOnly bool, since
 	return out
 }
 
-// readLogFile reads all JSONL entries from a single log file, oldest
-// first (the order they were appended in). A missing file yields an empty
-// slice, not an error.
-func readLogFile(path string) ([]supervisor.LogEntry, error) {
-	f, err := os.Open(path) //nolint:gosec // path is constructed from the store
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
+// errRecordTooLong is returned for a log record larger than a log file may
+// legitimately hold.
+var errRecordTooLong = errors.New("log record exceeds the maximum log file size")
 
-	var entries []supervisor.LogEntry
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 1024*1024)
-	for scanner.Scan() {
-		var e supervisor.LogEntry
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+// readRecord reads one newline-terminated record, holding at most limit
+// bytes in memory. A record cut off by EOF is returned with io.EOF.
+func readRecord(r *bufio.Reader, limit int) ([]byte, error) {
+	var record []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		record = append(record, chunk...)
+		if len(record) > limit {
+			return nil, errRecordTooLong
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
 		}
-		entries = append(entries, e)
+		return record, err
 	}
-	if err := scanner.Err(); err != nil {
-		return entries, err
+}
+
+// readLogFile reads all JSONL entries from an open log file, oldest first.
+// end is the offset just past the last record consumed. A trailing fragment
+// that is not yet a complete record is excluded, so a follower resuming at
+// end reads it once the writer has finished it.
+func readLogFile(f *os.File) (entries []supervisor.LogEntry, end int64, err error) {
+	reader := bufio.NewReader(f)
+	for {
+		line, readErr := readRecord(reader, state.MaxLogSize+1)
+		if len(line) > 0 {
+			var e supervisor.LogEntry
+			parsed := json.Unmarshal(line, &e) == nil
+			if parsed {
+				entries = append(entries, e)
+			}
+			if parsed || readErr == nil {
+				end += int64(len(line))
+			}
+		}
+		if readErr == io.EOF {
+			return entries, end, nil
+		}
+		if readErr != nil {
+			return entries, end, readErr
+		}
 	}
-	return entries, nil
 }
