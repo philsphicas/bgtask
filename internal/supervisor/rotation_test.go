@@ -99,7 +99,7 @@ func TestWriterRotatesLifecycleAndHealthEvents(t *testing.T) {
 	}
 }
 
-func TestWriterReportsAndRecoversFromRotationFailure(t *testing.T) {
+func TestWriterKeepsLoggingWhenRotationFailsAndResumesRotation(t *testing.T) {
 	w, store, id := rotationWriter(t, 256)
 	w.WriteOutput("o", strings.Repeat("x", 140))
 	blocker := store.OutputPath(id) + ".3"
@@ -114,19 +114,56 @@ func TestWriterReportsAndRecoversFromRotationFailure(t *testing.T) {
 	if _, err := os.Stat(errPath); err != nil {
 		t.Fatalf("missing rotation diagnostic: %v", err)
 	}
+	// Output is not dropped while rotation fails, and rotation is not
+	// retried on every write.
+	w.WriteOutput("o", strings.Repeat("z", 140))
+	if got := loggedData(t, store, id); len(got) != 3 {
+		t.Fatalf("expected all three records to be kept, got %d", len(got))
+	}
+	if _, err := os.Stat(store.OutputPath(id) + ".1"); err == nil {
+		t.Fatal("rotation should not be retried before the retry interval")
+	}
+
 	if err := os.Remove(filepath.Join(blocker, "block")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(blocker); err != nil {
 		t.Fatal(err)
 	}
+	w.retryRotateAt = time.Time{}
 	w.WriteOutput("e", "recovered\n")
 	entries := readLogEntries(t, store.OutputPath(id))
-	if len(entries) != 2 || entries[0].Data != "log_error" || entries[1].Data != "recovered\n" {
+	if len(entries) != 1 || entries[0].Data != "recovered\n" {
 		t.Fatalf("unexpected entries after recovery: %+v", entries)
+	}
+	if got := loggedData(t, store, id); len(got) != 4 {
+		t.Fatalf("no record may be lost across the failed rotation, got %d", len(got))
 	}
 	if _, err := os.Stat(errPath); err != nil {
 		t.Fatalf("diagnostic must remain visible after recovery: %v", err)
+	}
+}
+
+func TestWriterRotationSkipsMissingCurrentFile(t *testing.T) {
+	w, store, id := rotationWriter(t, 256)
+	// Point the writer at a handle whose file is not the task's output path,
+	// as if output.jsonl had been deleted while the task ran.
+	stray, err := os.Create(filepath.Join(t.TempDir(), "stray"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = w.f.Close()
+	if err := os.Remove(store.OutputPath(id)); err != nil {
+		t.Fatal(err)
+	}
+	w.f = stray
+	w.size = 200
+	w.WriteOutput("o", strings.Repeat("x", 140))
+	if _, err := os.Stat(filepath.Join(store.TaskDir(id), "log-error")); err == nil {
+		t.Fatal("a missing current file is not a rotation failure")
+	}
+	if got := loggedData(t, store, id); len(got) != 1 {
+		t.Fatalf("expected the record in a re-created log, got %v", got)
 	}
 }
 

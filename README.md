@@ -203,10 +203,12 @@ bgtask logs --stderr my-server     # stderr only
 While a task runs, its log rotates at 10 MiB and retains up to three
 older files, discarding the oldest as needed. A health-check message too large
 for a log file is replaced with an omission notice. Logs from older versions
-that already exceed the limit are not retroactively trimmed. If rotation or
-writing fails, logging may drop output; the most recent error is recorded in
-the task's `log-error` file and a lifecycle notice is logged when writing
-resumes. `bgtask cleanup` removes state for non-running tasks, including logs.
+that already exceed the limit are not retroactively trimmed. If rotation fails,
+the log keeps growing past the limit and rotation is retried about once a
+second. If writing fails, output may be dropped. The most recent error is
+recorded in the task's `log-error` file, and a lifecycle notice is logged when
+writing resumes. `bgtask cleanup` removes state for non-running tasks,
+including logs.
 
 ### Port detection
 

@@ -7,8 +7,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -502,7 +504,13 @@ type jsonlWriter struct {
 	// diagnostic is the message last stored in log-error.
 	diagnostic string
 	rotation   *state.LogRotation
+	// retryRotateAt delays the next rotation attempt after a failure, during
+	// which the current file keeps growing instead of dropping output.
+	retryRotateAt time.Time
 }
+
+// rotateRetryInterval spaces out rotation attempts while rotation is failing.
+const rotateRetryInterval = time.Second
 
 func (w *jsonlWriter) WriteOutput(stream, data string) {
 	w.write(LogEntry{
@@ -604,10 +612,16 @@ func (w *jsonlWriter) append(record []byte) bool {
 	if w.partial {
 		pad = 1
 	}
-	if w.store != nil && (w.f == nil || (w.size > 0 && w.size+pad+int64(len(record)) > w.maxSize)) {
+	needRotate := w.f == nil ||
+		(w.size > 0 && w.size+pad+int64(len(record)) > w.maxSize && !time.Now().Before(w.retryRotateAt))
+	if w.store != nil && needRotate {
 		if err := w.rotate(); err != nil {
+			// rotate reopens the current file when it can, so output is
+			// kept (past the size limit) until rotation works again.
 			w.reportError(err)
-			return false
+			w.retryRotateAt = time.Now().Add(rotateRetryInterval)
+		} else {
+			w.retryRotateAt = time.Time{}
 		}
 	}
 	if w.f == nil {
@@ -629,6 +643,9 @@ func (w *jsonlWriter) append(record []byte) bool {
 	return true
 }
 
+// rotate shifts the current log into the backups and opens a fresh current
+// file. If shifting fails, it still reopens the current file for appending
+// and returns the shift error, so the caller can keep logging and retry.
 func (w *jsonlWriter) rotate() error {
 	if w.f != nil {
 		if err := w.f.Close(); err != nil {
@@ -638,30 +655,43 @@ func (w *jsonlWriter) rotate() error {
 		w.f = nil
 	}
 	path := w.store.OutputPath(w.id)
+	var rotateErr error
 	if w.size > 0 {
-		if w.rotation == nil {
-			w.rotation = w.store.NewLogRotation(w.id)
-		}
-		if err := w.rotation.Rotate(); err != nil {
-			return fmt.Errorf("rotate log: %w", err)
-		}
-		w.rotation = nil
-		w.size = 0
+		rotateErr = w.shiftLogs(path)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return fmt.Errorf("open log after rotation: %w", err)
+		return errors.Join(rotateErr, fmt.Errorf("open log after rotation: %w", err))
 	}
 	info, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
-		return fmt.Errorf("stat log after rotation: %w", err)
+		return errors.Join(rotateErr, fmt.Errorf("stat log after rotation: %w", err))
 	}
 	w.f = f
 	w.size = info.Size()
 	if w.size == 0 {
 		w.partial = false
 	}
+	return rotateErr
+}
+
+// shiftLogs moves the current log to the first backup. A current file that
+// no longer exists has nothing to rotate.
+func (w *jsonlWriter) shiftLogs(path string) error {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		w.rotation = nil
+		w.size = 0
+		return nil
+	}
+	if w.rotation == nil {
+		w.rotation = w.store.NewLogRotation(w.id)
+	}
+	if err := w.rotation.Rotate(); err != nil {
+		return fmt.Errorf("rotate log: %w", err)
+	}
+	w.rotation = nil
+	w.size = 0
 	return nil
 }
 
