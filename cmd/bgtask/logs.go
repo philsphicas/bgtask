@@ -17,8 +17,10 @@ import (
 
 // showLogs prints the entries already resolved by taskservice.Service.Logs
 // (respecting tail/since/all/stream filters), then optionally follows the
-// task's current log file for new lines. The follow loop is CLI-only: it
-// polls the file directly and is not part of the service's bounded read.
+// task's logs for new lines. The follow loop is CLI-only: it polls the file
+// directly and is not part of the service's bounded read. It resumes from
+// the handle the service positioned after the last printed entry, so nothing
+// written after that read is skipped.
 func showLogs(result *taskservice.LogsResult, follow, stdoutOnly, stderrOnly, timestamps bool) error {
 	if !result.HasAnyLogFile {
 		fmt.Println("No logs yet.")
@@ -32,7 +34,7 @@ func showLogs(result *taskservice.LogsResult, follow, stdoutOnly, stderrOnly, ti
 	if !follow {
 		return nil
 	}
-	return followLogs(result.OutputPath, result.ExitPath, 200*time.Millisecond, nextLogFile, func(e supervisor.LogEntry) {
+	return followLogs(result.Follow, result.OutputPath, result.ExitPath, 200*time.Millisecond, nextLogFile, func(e supervisor.LogEntry) {
 		if stdoutOnly && e.Stream != "o" {
 			return
 		}
@@ -43,17 +45,10 @@ func showLogs(result *taskservice.LogsResult, follow, stdoutOnly, stderrOnly, ti
 	})
 }
 
-func followLogs(path, exitPath string, interval time.Duration, findNext func(*os.File, string) (*os.File, error), emit func(supervisor.LogEntry)) error {
-	f, err := state.OpenLog(path)
-	if err != nil {
-		return err
-	}
+// followLogs prints entries appended after f's current position, advancing
+// through rotated files as they appear. It takes ownership of f.
+func followLogs(f *os.File, path, exitPath string, interval time.Duration, findNext func(*os.File, string) (*os.File, error), emit func(supervisor.LogEntry)) error {
 	defer func() { _ = f.Close() }()
-
-	// Seek to end so we only show new lines.
-	if _, err := f.Seek(0, io.SeekEnd); err != nil {
-		return err
-	}
 
 	eofCount := 0
 	reader := bufio.NewReader(f)

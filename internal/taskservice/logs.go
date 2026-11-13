@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -48,11 +49,16 @@ func (s *Service) Logs(ctx context.Context, req LogsRequest) (*LogsResult, error
 		}
 	}
 
-	logFiles, err := state.OpenLogFiles(s.Store.OutputPath(id))
-	if err != nil {
-		return nil, Internal(op, req.Ref, id, err)
-	}
-	defer state.CloseLogFiles(logFiles)
+	logFiles := state.OpenLogSnapshot(s.Store.OutputPath(id))
+	// follow is the newest file handed to the caller; it must stay open.
+	var follow *os.File
+	defer func() {
+		for _, lf := range logFiles {
+			if lf.File != nil && lf.File != follow {
+				_ = lf.File.Close()
+			}
+		}
+	}()
 	taskDir := s.Store.TaskDir(id)
 	result := &LogsResult{
 		HasAnyLogFile: len(logFiles) > 0,
@@ -65,10 +71,18 @@ func (s *Service) Logs(ctx context.Context, req LogsRequest) (*LogsResult, error
 	// yields the overall chronological entry list.
 	var chunks [][]supervisor.LogEntry
 	matched := 0
-	for _, f := range logFiles {
-		raw, err := readLogFile(f)
+	var newestEnd int64
+	for i, lf := range logFiles {
+		// An older file that is never reached cannot fail the request.
+		if lf.File == nil {
+			return nil, Internal(op, req.Ref, id, lf.Err)
+		}
+		raw, end, err := readLogFile(lf.File)
 		if err != nil {
 			return nil, Internal(op, req.Ref, id, err)
+		}
+		if i == 0 {
+			newestEnd = end
 		}
 		filtered := filterEntries(raw, req.Stdout, req.Stderr, effectiveSince)
 		chunks = append(chunks, filtered)
@@ -98,6 +112,16 @@ func (s *Service) Logs(ctx context.Context, req LogsRequest) (*LogsResult, error
 		}
 	}
 
+	// The newest file is always read first, so it is positioned exactly
+	// after the entries above and a follower misses nothing written since.
+	if req.Follow && len(logFiles) > 0 {
+		if _, err := logFiles[0].File.Seek(newestEnd, io.SeekStart); err != nil {
+			return nil, Internal(op, req.Ref, id, err)
+		}
+		follow = logFiles[0].File
+		result.Follow = follow
+	}
+
 	result.Entries = entries
 	return result, nil
 }
@@ -122,19 +146,28 @@ func filterEntries(raw []supervisor.LogEntry, stdoutOnly, stderrOnly bool, since
 }
 
 // readLogFile reads all JSONL entries from an open log file, oldest first.
-func readLogFile(f *os.File) ([]supervisor.LogEntry, error) {
-	var entries []supervisor.LogEntry
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), state.MaxLogSize+1)
-	for scanner.Scan() {
-		var e supervisor.LogEntry
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
-			continue
+// end is the offset just past the last record consumed. A trailing fragment
+// that is not yet a complete record is excluded, so a follower resuming at
+// end reads it once the writer has finished it.
+func readLogFile(f *os.File) (entries []supervisor.LogEntry, end int64, err error) {
+	reader := bufio.NewReader(f)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			var e supervisor.LogEntry
+			parsed := json.Unmarshal(line, &e) == nil
+			if parsed {
+				entries = append(entries, e)
+			}
+			if parsed || readErr == nil {
+				end += int64(len(line))
+			}
 		}
-		entries = append(entries, e)
+		if readErr == io.EOF {
+			return entries, end, nil
+		}
+		if readErr != nil {
+			return entries, end, readErr
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		return entries, err
-	}
-	return entries, nil
 }

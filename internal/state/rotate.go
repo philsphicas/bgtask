@@ -84,14 +84,23 @@ func (s *Store) ListLogFiles(id string) []string {
 	return files
 }
 
-// OpenLogFiles opens a newest-first snapshot. A file can move while the
-// names are scanned, so duplicate identities are discarded.
-func OpenLogFiles(path string) ([]*os.File, error) {
-	return openLogFiles(path, OpenLog)
+// LogFile is one file of a log snapshot. File is nil when the file exists but
+// could not be opened; Err then records why, so a reader fails only if it
+// actually needs that file.
+type LogFile struct {
+	File *os.File
+	Err  error
 }
 
-func openLogFiles(path string, open func(string) (*os.File, error)) ([]*os.File, error) {
-	var files []*os.File
+// OpenLogSnapshot opens a newest-first snapshot of the task's log files. A
+// file can move while the names are scanned, so duplicate identities are
+// discarded.
+func OpenLogSnapshot(path string) []LogFile {
+	return openLogSnapshot(path, OpenLog)
+}
+
+func openLogSnapshot(path string, open func(string) (*os.File, error)) []LogFile {
+	var files []LogFile
 	var infos []os.FileInfo
 	for i := 0; i <= MaxLogFiles; i++ {
 		name := path
@@ -103,14 +112,14 @@ func openLogFiles(path string, open func(string) (*os.File, error)) ([]*os.File,
 			continue
 		}
 		if err != nil {
-			CloseLogFiles(files)
-			return nil, err
+			files = append(files, LogFile{Err: err})
+			continue
 		}
 		info, err := f.Stat()
 		if err != nil {
 			_ = f.Close()
-			CloseLogFiles(files)
-			return nil, err
+			files = append(files, LogFile{Err: err})
+			continue
 		}
 		duplicate := false
 		for _, previous := range infos {
@@ -123,8 +132,32 @@ func openLogFiles(path string, open func(string) (*os.File, error)) ([]*os.File,
 			_ = f.Close()
 			continue
 		}
-		files = append(files, f)
+		files = append(files, LogFile{File: f})
 		infos = append(infos, info)
+	}
+	return files
+}
+
+// CloseLogSnapshot closes the handles returned by OpenLogSnapshot.
+func CloseLogSnapshot(files []LogFile) {
+	for _, f := range files {
+		if f.File != nil {
+			_ = f.File.Close()
+		}
+	}
+}
+
+// OpenLogFiles is like OpenLogSnapshot but fails if any file cannot be
+// opened.
+func OpenLogFiles(path string) ([]*os.File, error) {
+	snapshot := OpenLogSnapshot(path)
+	files := make([]*os.File, 0, len(snapshot))
+	for _, f := range snapshot {
+		if f.Err != nil {
+			CloseLogSnapshot(snapshot)
+			return nil, f.Err
+		}
+		files = append(files, f.File)
 	}
 	return files, nil
 }

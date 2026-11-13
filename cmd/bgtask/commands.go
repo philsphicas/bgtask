@@ -500,6 +500,7 @@ func (l *LogsCmd) Run(svc *taskservice.Service) error {
 		All:    l.All,
 		Stdout: l.Stdout,
 		Stderr: l.Stderr,
+		Follow: l.Follow,
 	})
 	if err != nil {
 		return err

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/philsphicas/bgtask/internal/state"
 	"github.com/philsphicas/bgtask/internal/supervisor"
 )
 
@@ -35,6 +36,13 @@ func TestFollowDrainsWritesBeforeSwitching(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The handle is opened before the entry below is written, as the service
+	// does when it reads a snapshot, so the entry must not be skipped.
+	f, err := state.OpenLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeEntry(path, "gap")
 	first := true
 	findNext := func(f *os.File, name string) (*os.File, error) {
 		if first {
@@ -51,13 +59,13 @@ func TestFollowDrainsWritesBeforeSwitching(t *testing.T) {
 		return nextLogFile(f, name)
 	}
 	var got []string
-	err := followLogs(path, exitPath, time.Millisecond, findNext, func(e supervisor.LogEntry) {
+	err = followLogs(f, path, exitPath, time.Millisecond, findNext, func(e supervisor.LogEntry) {
 		got = append(got, e.Data)
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, []string{"old", "new"}) {
-		t.Fatalf("got %v, want [old new]", got)
+	if !reflect.DeepEqual(got, []string{"gap", "old", "new"}) {
+		t.Fatalf("got %v, want [gap old new]", got)
 	}
 }

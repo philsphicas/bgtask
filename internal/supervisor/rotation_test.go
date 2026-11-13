@@ -3,6 +3,7 @@ package supervisor
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -126,6 +127,90 @@ func TestWriterReportsAndRecoversFromRotationFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(errPath); err != nil {
 		t.Fatalf("diagnostic must remain visible after recovery: %v", err)
+	}
+}
+
+// loggedData returns the Data of every readable entry, oldest first, across
+// the current log and its backups.
+func loggedData(t *testing.T, store *state.Store, id string) []string {
+	t.Helper()
+	files := store.ListLogFiles(id)
+	var data []string
+	for i := len(files) - 1; i >= 0; i-- {
+		for _, e := range readLogEntries(t, files[i]) {
+			data = append(data, e.Data)
+		}
+	}
+	return data
+}
+
+func TestWriterEmitsRecoveryNoticeWhenRecordNeedsItsOwnFile(t *testing.T) {
+	w, store, id := rotationWriter(t, 256)
+	w.failed = true
+	// The record fits in a file on its own, but not together with the notice.
+	w.WriteHealthEvent("health_fail", strings.Repeat("x", 120))
+	got := loggedData(t, store, id)
+	if len(got) != 2 || got[0] != "log_error" || got[1] != "health_fail" {
+		t.Fatalf("expected the notice before the record, got %v", got)
+	}
+	if w.failed {
+		t.Fatal("failed state should be cleared once the notice is written")
+	}
+	for _, path := range store.ListLogFiles(id) {
+		if info, err := os.Stat(path); err != nil || info.Size() > 256 {
+			t.Fatalf("size/error: %v / %v", info, err)
+		}
+	}
+}
+
+func TestWriterEndsPartialRecordBeforeResuming(t *testing.T) {
+	w, store, id := rotationWriter(t, 1024)
+	n, err := w.f.WriteString(`{"t":"2026-`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.size += int64(n)
+	w.partial = true
+	w.failed = true
+	w.WriteOutput("o", "after\n")
+	got := loggedData(t, store, id)
+	if len(got) != 2 || got[0] != "log_error" || got[1] != "after\n" {
+		t.Fatalf("fragment must not swallow the notice or record, got %v", got)
+	}
+	if w.partial {
+		t.Fatal("partial state should be cleared by a complete write")
+	}
+}
+
+func TestWriterRecordsLatestErrorAndRetriesFailedDiagnostic(t *testing.T) {
+	w, store, id := rotationWriter(t, 256)
+	errPath := filepath.Join(store.TaskDir(id), "log-error")
+	read := func() string {
+		t.Helper()
+		data, err := os.ReadFile(errPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+
+	// A directory makes the first attempt to record the error fail.
+	if err := os.Mkdir(errPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.reportError(errors.New("first"))
+	if err := os.Remove(errPath); err != nil {
+		t.Fatal(err)
+	}
+	w.reportError(errors.New("first"))
+	if got := read(); got != "first\n" {
+		t.Fatalf("diagnostic = %q, want the retried first error", got)
+	}
+
+	// The writer is still in the same failure; the file must track the latest error.
+	w.reportError(errors.New("second"))
+	if got := read(); got != "second\n" {
+		t.Fatalf("diagnostic = %q, want the latest error", got)
 	}
 }
 

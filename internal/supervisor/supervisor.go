@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -485,15 +486,22 @@ func exitCodeFrom(err error) int {
 
 // jsonlWriter writes log entries to a JSONL file, thread-safe.
 type jsonlWriter struct {
-	f        *os.File
-	mu       sync.Mutex
-	store    *state.Store
-	id       string
-	size     int64
-	maxSize  int64
-	closed   bool
-	failed   bool
-	rotation *state.LogRotation
+	f       *os.File
+	mu      sync.Mutex
+	store   *state.Store
+	id      string
+	size    int64
+	maxSize int64
+	closed  bool
+	// failed is set while logging is interrupted; the next successful write
+	// is preceded by a notice record.
+	failed bool
+	// partial is set when a failed write may have left an incomplete record
+	// at the end of the file.
+	partial bool
+	// diagnostic is the message last stored in log-error.
+	diagnostic string
+	rotation   *state.LogRotation
 }
 
 func (w *jsonlWriter) WriteOutput(stream, data string) {
@@ -559,9 +567,9 @@ func (w *jsonlWriter) write(entry LogEntry) {
 			return
 		}
 	}
-	var payload []byte
+	data = append(data, '\n')
 	if w.failed && w.store != nil {
-		payload, err = json.Marshal(LogEntry{
+		notice, err := json.Marshal(LogEntry{
 			Time: time.Now(), Stream: "x", Data: "log_error",
 			Message: "logging was interrupted; see log-error in the task directory",
 		})
@@ -569,32 +577,56 @@ func (w *jsonlWriter) write(entry LogEntry) {
 			w.reportError(err)
 			return
 		}
-		payload = append(payload, '\n')
+		notice = append(notice, '\n')
+		switch {
+		case w.maxSize > 0 && int64(len(notice)) > w.maxSize:
+			// The separate diagnostic file still records the failure.
+			w.failed = false
+		case w.maxSize > 0 && int64(len(notice)+len(data)) > w.maxSize:
+			// Keep the notice even when the record needs its own file.
+			if !w.append(notice) {
+				return
+			}
+			w.failed = false
+		default:
+			data = slices.Concat(notice, data)
+		}
 	}
-	needed := int64(len(payload) + len(data) + 1)
-	if w.maxSize > 0 && needed > w.maxSize {
-		// The separate diagnostic file still records the failure.
-		payload = nil
-		needed = int64(len(data) + 1)
+	if w.append(data) {
+		w.failed = false
 	}
-	if w.store != nil && (w.f == nil || (w.size > 0 && w.size+needed > w.maxSize)) {
+}
+
+// append writes complete records, rotating first when they would not fit in
+// the current file. It reports whether the records were written.
+func (w *jsonlWriter) append(record []byte) bool {
+	pad := int64(0)
+	if w.partial {
+		pad = 1
+	}
+	if w.store != nil && (w.f == nil || (w.size > 0 && w.size+pad+int64(len(record)) > w.maxSize)) {
 		if err := w.rotate(); err != nil {
 			w.reportError(err)
-			return
+			return false
 		}
 	}
 	if w.f == nil {
-		return
+		return false
 	}
-	payload = append(payload, data...)
-	payload = append(payload, '\n')
-	n, err := w.f.Write(payload)
+	// A failed write may have left a fragment; end it so the record that
+	// follows starts on its own line.
+	if w.partial {
+		record = slices.Concat([]byte{'\n'}, record)
+	}
+	n, err := w.f.Write(record)
 	w.size += int64(n)
 	if err != nil {
+		w.partial = w.partial || n > 0
 		w.reportError(fmt.Errorf("write log: %w", err))
-	} else {
-		w.failed = false
+		return false
 	}
+	w.partial = false
+	return true
 }
 
 func (w *jsonlWriter) rotate() error {
@@ -627,20 +659,29 @@ func (w *jsonlWriter) rotate() error {
 	}
 	w.f = f
 	w.size = info.Size()
+	if w.size == 0 {
+		w.partial = false
+	}
 	return nil
 }
 
 // reportError leaves a bounded, visible diagnostic even when log writes fail.
+// log-error always holds the latest distinct error; it is rewritten when the
+// error changes or an earlier attempt to record it failed.
 func (w *jsonlWriter) reportError(err error) {
 	if w.store == nil {
 		_, _ = fmt.Fprintf(os.Stderr, "bgtask log error: %v\n", err)
 		return
 	}
-	if !w.failed {
-		path := filepath.Join(w.store.TaskDir(w.id), "log-error")
-		if writeErr := os.WriteFile(path, []byte(err.Error()+"\n"), 0o600); writeErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "bgtask log error: %v (recording error: %v)\n", err, writeErr)
-		}
-	}
 	w.failed = true
+	message := err.Error()
+	if message == w.diagnostic {
+		return
+	}
+	path := filepath.Join(w.store.TaskDir(w.id), "log-error")
+	if writeErr := os.WriteFile(path, []byte(message+"\n"), 0o600); writeErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "bgtask log error: %v (recording error: %v)\n", err, writeErr)
+		return
+	}
+	w.diagnostic = message
 }

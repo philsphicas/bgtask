@@ -3,8 +3,10 @@ package taskservice_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,5 +200,94 @@ func TestLogs_BoundedTailAcrossRotatedFiles(t *testing.T) {
 	}
 	if result.Entries[0].Data != "newest1\n" || result.Entries[1].Data != "newest2\n" {
 		t.Errorf("expected the 2 newest entries from the current file alone, got %+v", result.Entries)
+	}
+}
+
+func TestLogsFollowHandleResumesAfterReturnedEntries(t *testing.T) {
+	svc, _ := newTestService(t)
+	created := mustRun(t, svc, "follow-position", []string{"sleep", "100"})
+	path := svc.Store.OutputPath(created.Task.ID)
+	writeLogEntries(t, path, []supervisor.LogEntry{entry(0, "o", "before\n")})
+
+	result, err := svc.Logs(context.Background(), taskservice.LogsRequest{Ref: "follow-position", Tail: -1, Follow: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = result.Follow.Close() }()
+	if len(result.Entries) != 1 || result.Entries[0].Data != "before\n" {
+		t.Fatalf("unexpected entries: %+v", result.Entries)
+	}
+
+	// An entry written after the read, followed by a rotation, must still
+	// be reachable from the returned handle.
+	writeLogEntries(t, path, []supervisor.LogEntry{entry(0, "o", "late\n")})
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	writeLogEntries(t, path, []supervisor.LogEntry{entry(0, "o", "new\n")})
+
+	rest, err := io.ReadAll(result.Follow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(rest); strings.Count(got, "\n") != 1 || !strings.Contains(got, `"late\n"`) {
+		t.Fatalf("handle should resume at the late entry only, got %q", got)
+	}
+}
+
+func TestLogsFollowHandleStopsBeforeIncompleteRecord(t *testing.T) {
+	svc, _ := newTestService(t)
+	created := mustRun(t, svc, "follow-partial", []string{"sleep", "100"})
+	path := svc.Store.OutputPath(created.Task.ID)
+	writeLogEntries(t, path, []supervisor.LogEntry{entry(0, "o", "complete\n")})
+	const fragment = `{"stream":"o","da`
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(fragment); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Logs(context.Background(), taskservice.LogsRequest{Ref: "follow-partial", Tail: -1, Follow: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = result.Follow.Close() }()
+	if len(result.Entries) != 1 {
+		t.Fatalf("unexpected entries: %+v", result.Entries)
+	}
+	rest, err := io.ReadAll(result.Follow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rest) != fragment {
+		t.Fatalf("handle should resume before the incomplete record, got %q", rest)
+	}
+}
+
+// An unopenable backup (a directory stands in for one) only matters if the
+// request has to read it.
+func TestLogsIgnoresUnreadableBackupWhenNotNeeded(t *testing.T) {
+	svc, _ := newTestService(t)
+	created := mustRun(t, svc, "bad-backup", []string{"sleep", "100"})
+	path := svc.Store.OutputPath(created.Task.ID)
+	if err := os.Mkdir(path+".3", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeLogEntries(t, path, []supervisor.LogEntry{entry(0, "o", "current\n")})
+
+	result, err := svc.Logs(context.Background(), taskservice.LogsRequest{Ref: "bad-backup", Tail: 1, All: true})
+	if err != nil {
+		t.Fatalf("bounded read should not touch the unreadable backup: %v", err)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].Data != "current\n" {
+		t.Fatalf("unexpected entries: %+v", result.Entries)
+	}
+	if _, err := svc.Logs(context.Background(), taskservice.LogsRequest{Ref: "bad-backup", Tail: -1, All: true}); err == nil {
+		t.Fatal("an unbounded read needs the unreadable backup and must report the failure")
 	}
 }
