@@ -559,9 +559,9 @@ func (w *jsonlWriter) write(entry LogEntry) {
 			return
 		}
 	}
-	var notice []byte
+	var payload []byte
 	if w.failed && w.store != nil {
-		notice, err = json.Marshal(LogEntry{
+		payload, err = json.Marshal(LogEntry{
 			Time: time.Now(), Stream: "x", Data: "log_error",
 			Message: "logging was interrupted; see log-error in the task directory",
 		})
@@ -569,12 +569,12 @@ func (w *jsonlWriter) write(entry LogEntry) {
 			w.reportError(err)
 			return
 		}
-		notice = append(notice, '\n')
+		payload = append(payload, '\n')
 	}
-	needed := int64(len(notice) + len(data) + 1)
+	needed := int64(len(payload) + len(data) + 1)
 	if w.maxSize > 0 && needed > w.maxSize {
 		// The separate diagnostic file still records the failure.
-		notice = nil
+		payload = nil
 		needed = int64(len(data) + 1)
 	}
 	if w.store != nil && (w.f == nil || (w.size > 0 && w.size+needed > w.maxSize)) {
@@ -586,7 +586,7 @@ func (w *jsonlWriter) write(entry LogEntry) {
 	if w.f == nil {
 		return
 	}
-	payload := append(notice, data...)
+	payload = append(payload, data...)
 	payload = append(payload, '\n')
 	n, err := w.f.Write(payload)
 	w.size += int64(n)

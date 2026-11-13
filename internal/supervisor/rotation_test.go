@@ -154,7 +154,7 @@ func TestLiveRotationHelper(t *testing.T) {
 	}
 	fmt.Println("rotation-ready")
 	for {
-		if _, err := os.Stat(os.Getenv("BGTASK_ROTATION_RELEASE")); err == nil {
+		if _, err := os.Stat(os.Getenv("BGTASK_ROTATION_RELEASE")); err == nil { // #nosec G703 -- test helper path supplied by the parent test.
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
