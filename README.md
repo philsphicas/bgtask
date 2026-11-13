@@ -200,6 +200,14 @@ bgtask logs --stdout my-server     # stdout only
 bgtask logs --stderr my-server     # stderr only
 ```
 
+While a task runs, its log rotates at 10 MiB and retains up to three
+older files, discarding the oldest as needed. A single oversized entry is
+replaced with an omission notice. Logs from older versions that already exceed
+the limit are not retroactively trimmed. If rotation or writing fails, logging
+may drop output; the most recent error is recorded in the task's `log-error`
+file and a lifecycle notice is logged when writing resumes. `bgtask cleanup`
+removes state for non-running tasks, including logs.
+
 ### Port detection
 
 `bgtask ls` and `bgtask status` automatically detect listening TCP ports for running tasks.

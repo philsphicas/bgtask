@@ -9,6 +9,7 @@ import (
 	"time"
 
 	lipgloss "charm.land/lipgloss/v2"
+	"github.com/philsphicas/bgtask/internal/state"
 	"github.com/philsphicas/bgtask/internal/supervisor"
 	"github.com/philsphicas/bgtask/internal/taskservice"
 	"github.com/philsphicas/bgtask/internal/ui"
@@ -31,9 +32,19 @@ func showLogs(result *taskservice.LogsResult, follow, stdoutOnly, stderrOnly, ti
 	if !follow {
 		return nil
 	}
+	return followLogs(result.OutputPath, result.ExitPath, 200*time.Millisecond, nextLogFile, func(e supervisor.LogEntry) {
+		if stdoutOnly && e.Stream != "o" {
+			return
+		}
+		if stderrOnly && e.Stream != "e" {
+			return
+		}
+		printLogEntry(e, timestamps)
+	})
+}
 
-	// Follow mode: poll the current (newest) log file for new lines.
-	f, err := os.Open(result.OutputPath) //nolint:gosec // path from taskservice.LogsResult
+func followLogs(path, exitPath string, interval time.Duration, findNext func(*os.File, string) (*os.File, error), emit func(supervisor.LogEntry)) error {
+	f, err := state.OpenLog(path)
 	if err != nil {
 		return err
 	}
@@ -46,35 +57,94 @@ func showLogs(result *taskservice.LogsResult, follow, stdoutOnly, stderrOnly, ti
 
 	eofCount := 0
 	reader := bufio.NewReader(f)
+	var pending string
+	var next *os.File
+	defer func() {
+		if next != nil {
+			_ = next.Close()
+		}
+	}()
 	for {
 		line, err := reader.ReadString('\n')
+		pending += line
 		if err != nil {
 			if err == io.EOF {
+				if next != nil {
+					_ = f.Close()
+					f = next
+					next = nil
+					reader = bufio.NewReader(f)
+					pending = ""
+					eofCount = 0
+					continue
+				}
+				var nextErr error
+				next, nextErr = findNext(f, path)
+				if nextErr != nil {
+					return nextErr
+				}
+				if next != nil {
+					// Drain any writes that arrived after the first EOF,
+					// before switching away from the rotated file.
+					continue
+				}
 				eofCount++
 				// Every ~1s (5 * 200ms), check if the task has exited.
-				if eofCount%5 == 0 && result.ExitPath != "" {
-					if _, statErr := os.Stat(result.ExitPath); statErr == nil {
+				if eofCount%5 == 0 && exitPath != "" {
+					if _, statErr := os.Stat(exitPath); statErr == nil {
 						return nil
 					}
 				}
-				time.Sleep(200 * time.Millisecond)
+				time.Sleep(interval)
 				continue
 			}
 			return err
 		}
 		eofCount = 0
 		var e supervisor.LogEntry
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
+		if err := json.Unmarshal([]byte(pending), &e); err != nil {
+			pending = ""
 			continue
 		}
-		if stdoutOnly && e.Stream != "o" {
-			continue
-		}
-		if stderrOnly && e.Stream != "e" {
-			continue
-		}
-		printLogEntry(e, timestamps)
+		pending = ""
+		emit(e)
 	}
+}
+
+// nextLogFile advances to the next surviving file in chronological order.
+func nextLogFile(current *os.File, path string) (*os.File, error) {
+	currentInfo, err := current.Stat()
+	if err != nil {
+		return nil, err
+	}
+	files, err := state.OpenLogFiles(path)
+	if err != nil {
+		return nil, err
+	}
+	currentIndex := -1
+	for i, f := range files {
+		info, err := f.Stat()
+		if err != nil {
+			state.CloseLogFiles(files)
+			return nil, err
+		}
+		if os.SameFile(info, currentInfo) {
+			currentIndex = i
+		}
+	}
+	nextIndex := currentIndex - 1
+	if currentIndex == -1 {
+		nextIndex = len(files) - 1
+	}
+	var next *os.File
+	for i, f := range files {
+		if i == nextIndex {
+			next = f
+		} else {
+			_ = f.Close()
+		}
+	}
+	return next, nil
 }
 
 // milliTimestamp formats a time as RFC3339 with millisecond precision in UTC.

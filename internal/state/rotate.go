@@ -1,7 +1,9 @@
 package state
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 )
 
@@ -25,23 +27,42 @@ func (s *Store) ShouldRotateLog(id string, maxBytes int64) (bool, error) {
 // RotateLog rotates the output.jsonl file. The caller must ensure the file
 // is not open (closed before calling). Rotated files: .1, .2, .3.
 func (s *Store) RotateLog(id string) error {
-	return s.rotateLog(s.OutputPath(id))
+	return s.NewLogRotation(id).Rotate()
 }
 
-func (s *Store) rotateLog(logPath string) error {
-	// Shift existing rotated files: .3 -> delete, .2 -> .3, .1 -> .2
-	for i := MaxLogFiles; i >= 1; i-- {
-		old := fmt.Sprintf("%s.%d", logPath, i)
-		if i == MaxLogFiles {
-			_ = os.Remove(old)
-		} else {
-			newPath := fmt.Sprintf("%s.%d", logPath, i+1)
-			_ = os.Rename(old, newPath)
-		}
-	}
+// LogRotation tracks completed steps so a failed rotation can be retried
+// without shifting or deleting the same backup twice.
+type LogRotation struct {
+	path string
+	step int
+}
 
-	// Current -> .1
-	return os.Rename(logPath, logPath+".1")
+func (s *Store) NewLogRotation(id string) *LogRotation {
+	return &LogRotation{path: s.OutputPath(id), step: MaxLogFiles}
+}
+
+func (r *LogRotation) Rotate() error {
+	for r.step > 0 {
+		old := fmt.Sprintf("%s.%d", r.path, r.step)
+		if r.step == MaxLogFiles {
+			if err := os.Remove(old); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("remove oldest log: %w", err)
+			}
+		} else {
+			newPath := fmt.Sprintf("%s.%d", r.path, r.step+1)
+			if err := os.Rename(old, newPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("shift log %s: %w", old, err)
+			}
+		}
+		r.step--
+	}
+	if r.step == 0 {
+		if err := os.Rename(r.path, r.path+".1"); err != nil {
+			return fmt.Errorf("rotate current log: %w", err)
+		}
+		r.step--
+	}
+	return nil
 }
 
 // ListLogFiles returns all log files for a task (current + rotated), newest first.
@@ -61,4 +82,56 @@ func (s *Store) ListLogFiles(id string) []string {
 	}
 
 	return files
+}
+
+// OpenLogFiles opens a newest-first snapshot. A file can move while the
+// names are scanned, so duplicate identities are discarded.
+func OpenLogFiles(path string) ([]*os.File, error) {
+	return openLogFiles(path, OpenLog)
+}
+
+func openLogFiles(path string, open func(string) (*os.File, error)) ([]*os.File, error) {
+	var files []*os.File
+	var infos []os.FileInfo
+	for i := 0; i <= MaxLogFiles; i++ {
+		name := path
+		if i > 0 {
+			name = fmt.Sprintf("%s.%d", path, i)
+		}
+		f, err := open(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			CloseLogFiles(files)
+			return nil, err
+		}
+		info, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			CloseLogFiles(files)
+			return nil, err
+		}
+		duplicate := false
+		for _, previous := range infos {
+			if os.SameFile(info, previous) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			_ = f.Close()
+			continue
+		}
+		files = append(files, f)
+		infos = append(infos, info)
+	}
+	return files, nil
+}
+
+// CloseLogFiles closes the handles returned by OpenLogFiles.
+func CloseLogFiles(files []*os.File) {
+	for _, f := range files {
+		_ = f.Close()
+	}
 }

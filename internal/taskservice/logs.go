@@ -8,11 +8,12 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/philsphicas/bgtask/internal/state"
 	"github.com/philsphicas/bgtask/internal/supervisor"
 )
 
 // Logs returns log entries for a task, applying tail/since/all/stream
-// filters. It avoids opening older rotated log files once either:
+// filters. It avoids reading older rotated log files once either:
 //
 //   - a bounded tail request (req.Tail >= 0) has already collected enough
 //     matching entries from newer files, or
@@ -47,7 +48,11 @@ func (s *Service) Logs(ctx context.Context, req LogsRequest) (*LogsResult, error
 		}
 	}
 
-	logFiles := s.Store.ListLogFiles(id) // newest first
+	logFiles, err := state.OpenLogFiles(s.Store.OutputPath(id))
+	if err != nil {
+		return nil, Internal(op, req.Ref, id, err)
+	}
+	defer state.CloseLogFiles(logFiles)
 	taskDir := s.Store.TaskDir(id)
 	result := &LogsResult{
 		HasAnyLogFile: len(logFiles) > 0,
@@ -116,22 +121,11 @@ func filterEntries(raw []supervisor.LogEntry, stdoutOnly, stderrOnly bool, since
 	return out
 }
 
-// readLogFile reads all JSONL entries from a single log file, oldest
-// first (the order they were appended in). A missing file yields an empty
-// slice, not an error.
-func readLogFile(path string) ([]supervisor.LogEntry, error) {
-	f, err := os.Open(path) //nolint:gosec // path is constructed from the store
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
+// readLogFile reads all JSONL entries from an open log file, oldest first.
+func readLogFile(f *os.File) ([]supervisor.LogEntry, error) {
 	var entries []supervisor.LogEntry
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 256*1024), state.MaxLogSize+1)
 	for scanner.Scan() {
 		var e supervisor.LogEntry
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
